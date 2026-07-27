@@ -6,7 +6,7 @@
 
 - `payload_gen.py` создаёт `payloads.json` с byte-exact телами в Base64.
 - `k6_run_payloads.js` запускает только один кейс, выбранный через `PAYLOAD_INDEX`.
-- `run_suite.py` последовательно запускает отдельный процесс k6 для каждого кейса и сохраняет журнал и summary.
+- `run_suite.py` последовательно запускает отдельный процесс k6 для каждого кейса, выполняет health-check и сохраняет воспроизводимые артефакты.
 
 ## Требования
 
@@ -86,9 +86,38 @@ k6 run k6_run_payloads.js
 ```bash
 python3 run_suite.py \
   --target https://waf.example \
+  --health-url https://waf.example/health \
   --rps 10 \
   --duration 30s \
-  --cooldown 5
+  --cooldown 5 \
+  --retry-suspicious 1
+```
+
+### Что считается подозрительным
+
+Кейс помечается как suspicious, если выполняется хотя бы одно условие:
+
+- k6 завершился с ненулевым exit code;
+- отсутствует или не читается k6 summary;
+- `http_req_failed` достиг порога `--suspicious-status-rate`;
+- появились `dropped_iterations`;
+- health-check после кейса не прошёл.
+
+Подозрительный кейс автоматически повторяется указанное число раз. Между попытками используется `--retry-cooldown`.
+
+Пример более строгого запуска:
+
+```bash
+python3 run_suite.py \
+  --target https://waf.example \
+  --health-url https://waf.example/health \
+  --health-expected 200 204 403 \
+  --health-retries 5 \
+  --health-timeout 3 \
+  --retry-suspicious 2 \
+  --retry-cooldown 15 \
+  --suspicious-status-rate 0.01 \
+  --stop-on-failure
 ```
 
 Безопасный короткий smoke-test:
@@ -106,17 +135,32 @@ python3 payload_gen.py \
 
 python3 run_suite.py \
   --target https://waf.example \
+  --health-url https://waf.example/health \
   --rps 1 \
   --duration 5s \
   --limit 10 \
+  --retry-suspicious 1 \
   --stop-on-failure
 ```
 
+## Артефакты результата
+
 Результаты сохраняются в `results/<run-id>/`:
 
-- `run.jsonl` — временная линия активных кейсов;
-- `*.summary.json` — summary k6;
-- `*.stdout.log` и `*.stderr.log` — вывод отдельного запуска.
+- `run_config.json` — полный конфиг запуска и SHA-256 manifest;
+- `run.jsonl` — временная линия health-check, стартов и окончаний кейсов;
+- `active_cases.json` — текущий и последние активные case ID;
+- `suspicious_cases.jsonl` — подозрительные попытки вместе с полным описанием кейса;
+- `last_suspicious_case.json` — последний подозрительный кейс, результат и недавняя история;
+- `*.summary.json` — summary каждой попытки k6;
+- `*.stdout.log` и `*.stderr.log` — вывод отдельной попытки.
+
+При падении WAF первым делом следует открыть:
+
+```bash
+cat results/<run-id>/active_cases.json
+cat results/<run-id>/last_suspicious_case.json
+```
 
 Каждый запрос содержит:
 
