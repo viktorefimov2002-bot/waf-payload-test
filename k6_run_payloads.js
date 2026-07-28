@@ -1,21 +1,19 @@
 import http from 'k6/http';
 import { check } from 'k6';
-import { SharedArray } from 'k6/data';
 import encoding from 'k6/encoding';
 
-const payloads = new SharedArray('payloads', () => JSON.parse(open(__ENV.PAYLOAD_FILE || './payloads.json')));
-const caseIndex = Number.parseInt(__ENV.PAYLOAD_INDEX || '0', 10);
-
-if (!Number.isInteger(caseIndex) || caseIndex < 0 || caseIndex >= payloads.length) {
-    throw new Error(`PAYLOAD_INDEX=${__ENV.PAYLOAD_INDEX} is outside 0..${payloads.length - 1}`);
-}
-
-const currentCase = payloads[caseIndex];
+const caseFile = __ENV.CASE_FILE || './current_case.json';
+const currentCase = JSON.parse(open(caseFile));
+const caseIndex = Number.parseInt(__ENV.CASE_INDEX || '0', 10);
 const targetBase = (__ENV.TARGET_URL || 'https://your-target.com').replace(/\/$/, '');
 const rate = Number.parseInt(__ENV.RPS || '10', 10);
 const duration = __ENV.DURATION || '30s';
 const preAllocatedVUs = Number.parseInt(__ENV.PREALLOCATED_VUS || String(Math.max(10, rate)), 10);
 const maxVUs = Number.parseInt(__ENV.MAX_VUS || String(Math.max(preAllocatedVUs, rate * 2)), 10);
+
+if (!currentCase || typeof currentCase !== 'object' || !currentCase.body_base64) {
+    throw new Error(`CASE_FILE=${caseFile} does not contain a valid case object`);
+}
 
 export const options = {
     scenarios: {
