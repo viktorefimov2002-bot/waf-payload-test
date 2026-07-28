@@ -1,252 +1,351 @@
 #!/usr/bin/env python3
-"""
-Генератор вариантов пейлоадов для тестирования WAF.
-Поддерживает:
-  - различные кодировки и обфускации
-  - реальное сжатие (gzip, brotli, deflate) с сохранением в base64
-  - добавление «мусорного» префикса для увеличения размера
-  - два порядка: encode-then-pad и pad-then-encode
-Выходной JSON содержит поля:
-  - name: описание преобразований и размера
-  - payload: итоговая строка (для сжатых — base64)
-  - size: длина в байтах (UTF-8)
-  - encodings: список применённых техник
-  - is_compressed: bool
-  - compression: тип сжатия (gzip, br, deflate) или null
-"""
+"""Generate byte-exact HTTP request cases for WAF parser and memory testing."""
+
+from __future__ import annotations
 
 import argparse
 import base64
 import gzip
-import zlib
-import itertools
+import hashlib
 import json
 import random
-import urllib.parse
-from typing import List, Tuple, Callable, Optional
+import zlib
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Iterable
+from urllib.parse import urlencode
+from xml.sax.saxutils import escape as xml_escape
 
-# ---------- Импорт brotli (опционально) ----------
 try:
-    import brotli
-    HAS_BROTLI = True
-except ImportError:
-    HAS_BROTLI = False
-    print("Warning: brotli not installed. Brotli compression will be skipped.")
+    import brotli  # type: ignore
+except ImportError:  # pragma: no cover
+    brotli = None
 
-# ---------- Функции сжатия ----------
-def compress_gzip(data: bytes) -> bytes:
-    return gzip.compress(data)
 
-def compress_brotli(data: bytes) -> bytes:
-    if HAS_BROTLI:
+@dataclass(frozen=True)
+class Document:
+    body: str | bytes
+    media_type: str
+    structure: str
+    validity: str
+    metrics: dict[str, int | str | bool]
+
+
+def encode_text(text: str, charset: str, bom: bool = False) -> bytes:
+    normalized = charset.lower()
+    data = text.encode(normalized)
+    if not bom:
+        return data
+    prefixes = {
+        "utf-8": b"\xef\xbb\xbf",
+        "utf-16le": b"\xff\xfe",
+        "utf-16be": b"\xfe\xff",
+        "utf-32le": b"\xff\xfe\x00\x00",
+        "utf-32be": b"\x00\x00\xfe\xff",
+    }
+    return prefixes.get(normalized, b"") + data
+
+
+def compress_body(data: bytes, compression: str) -> bytes:
+    if compression == "none":
+        return data
+    if compression == "gzip":
+        return gzip.compress(data, compresslevel=6, mtime=0)
+    if compression == "deflate":
+        return zlib.compress(data, level=6)
+    if compression == "raw-deflate":
+        compressor = zlib.compressobj(level=6, wbits=-zlib.MAX_WBITS)
+        return compressor.compress(data) + compressor.flush()
+    if compression == "br":
+        if brotli is None:
+            raise RuntimeError("brotli module is not installed")
         return brotli.compress(data)
+    raise ValueError(f"Unsupported compression: {compression}")
+
+
+def corrupt_compressed(data: bytes, mode: str) -> bytes:
+    if mode == "valid":
+        return data
+    if not data:
+        return data
+    if mode == "truncated":
+        return data[: max(1, len(data) // 2)]
+    if mode == "bad-tail":
+        tail = bytearray(data)
+        for index in range(max(0, len(tail) - min(8, len(tail))), len(tail)):
+            tail[index] ^= 0xFF
+        return bytes(tail)
+    if mode == "bitflip":
+        mutated = bytearray(data)
+        mutated[len(mutated) // 2] ^= 0x20
+        return bytes(mutated)
+    raise ValueError(f"Unsupported corruption mode: {mode}")
+
+
+def make_filler(size: int, kind: str, seed: int) -> str:
+    if size <= 0:
+        return ""
+    if kind == "repeated":
+        return "A" * size
+    if kind == "unicode":
+        pattern = "Привет世界🙂e\u0301\u200d"
+        return (pattern * ((size // len(pattern)) + 1))[:size]
+    if kind == "random-ascii":
+        rng = random.Random(seed + size)
+        alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+        return "".join(rng.choice(alphabet) for _ in range(size))
+    if kind == "numeric":
+        pattern = "1234567890"
+        return (pattern * ((size // len(pattern)) + 1))[:size]
+    raise ValueError(f"Unsupported filler kind: {kind}")
+
+
+def nested_json(value: str, depth: int) -> Any:
+    node: Any = value
+    for index in range(depth):
+        node = {f"level_{index}": node}
+    return node
+
+
+def build_json(value: str, structure: str, depth: int, width: int, fields: int) -> Document:
+    if structure == "single":
+        obj: Any = {"input": value}
+        metrics = {"depth": 1, "width": 1, "fields": 1}
+    elif structure == "deep":
+        obj = nested_json(value, depth)
+        metrics = {"depth": depth, "width": 1, "fields": depth}
+    elif structure == "wide":
+        obj = {f"field_{index:06d}": value for index in range(width)}
+        metrics = {"depth": 1, "width": width, "fields": width}
+    elif structure == "array":
+        obj = [value for _ in range(width)]
+        metrics = {"depth": 1, "width": width, "fields": width}
+    elif structure == "duplicate-keys":
+        pairs = ",".join(f'"dup":{json.dumps(value, ensure_ascii=False)}' for _ in range(fields))
+        return Document("{" + pairs + "}", "application/json", structure, "valid", {"depth": 1, "width": fields, "fields": fields})
+    elif structure == "many-fields":
+        obj = {f"k{index}": index for index in range(fields)}
+        obj["input"] = value
+        metrics = {"depth": 1, "width": fields + 1, "fields": fields + 1}
+    elif structure == "truncated":
+        valid = json.dumps({"input": value}, ensure_ascii=False, separators=(",", ":"))
+        return Document(valid[:-1], "application/json", structure, "invalid", {"depth": 1, "width": 1, "fields": 1})
+    elif structure == "trailing-garbage":
+        valid = json.dumps({"input": value}, ensure_ascii=False, separators=(",", ":"))
+        return Document(valid + " trailing", "application/json", structure, "invalid", {"depth": 1, "width": 1, "fields": 1})
     else:
-        raise RuntimeError("brotli is not available")
+        raise ValueError(f"Unsupported JSON structure: {structure}")
+    body = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    return Document(body, "application/json", structure, "valid", metrics)
 
-def compress_deflate(data: bytes) -> bytes:
-    # zlib.compress (RFC 1950) – распространённый формат
-    return zlib.compress(data, level=6)
 
-# ---------- Вспомогательные функции обфускации ----------
-def escape_js(s: str) -> str:
-    """Преобразует строку в JavaScript-escaped (\\xXX, \\uXXXX)."""
-    res = []
-    for ch in s:
-        code = ord(ch)
-        if code < 128:
-            res.append(f'\\x{code:02x}')
-        else:
-            res.append(f'\\u{code:04x}')
-    return ''.join(res)
+def build_form(value: str, structure: str, fields: int) -> Document:
+    if structure == "single":
+        body = urlencode({"input": value})
+        count = 1
+        validity = "valid"
+    elif structure == "many-fields":
+        values = [(f"k{index}", str(index)) for index in range(fields)]
+        values.append(("input", value))
+        body = urlencode(values)
+        count = fields + 1
+        validity = "valid"
+    elif structure == "repeated-keys":
+        body = urlencode([("input", value) for _ in range(fields)])
+        count = fields
+        validity = "valid"
+    elif structure == "empty-pairs":
+        body = "&".join(["=", "a=", "=b", "input=" + value])
+        count = 4
+        validity = "valid"
+    elif structure == "invalid-percent":
+        body = "input=%E2%82&bad=%ZZ&tail=%"
+        count = 3
+        validity = "invalid"
+    else:
+        raise ValueError(f"Unsupported form structure: {structure}")
+    return Document(body, "application/x-www-form-urlencoded", structure, validity, {"fields": count, "depth": 1, "width": count})
 
-def add_sql_comments(s: str) -> str:
-    """Заменяет пробелы на /**/ и добавляет -- в конец."""
-    return s.replace(' ', '/**/') + ' -- '
 
-def random_case(s: str, seed: int = 42) -> str:
-    """Детерминированный случайный регистр."""
-    rng = random.Random(seed)
-    return ''.join(ch.upper() if rng.randint(0, 1) else ch.lower() for ch in s)
+def build_xml(value: str, structure: str, depth: int, width: int) -> Document:
+    safe = xml_escape(value)
+    if structure == "single":
+        body = f'<?xml version="1.0"?><root><input>{safe}</input></root>'
+        validity = "valid"
+        metrics = {"depth": 2, "width": 1, "fields": 1}
+    elif structure == "deep":
+        opening = "".join(f"<level{index}>" for index in range(depth))
+        closing = "".join(f"</level{index}>" for index in reversed(range(depth)))
+        body = f'<?xml version="1.0"?><root>{opening}{safe}{closing}</root>'
+        validity = "valid"
+        metrics = {"depth": depth + 1, "width": 1, "fields": depth}
+    elif structure == "wide":
+        children = "".join(f"<item id=\"{index}\">{safe}</item>" for index in range(width))
+        body = f'<?xml version="1.0"?><root>{children}</root>'
+        validity = "valid"
+        metrics = {"depth": 2, "width": width, "fields": width}
+    elif structure == "attributes":
+        attrs = " ".join(f'a{index}="{index}"' for index in range(width))
+        body = f'<?xml version="1.0"?><root {attrs}><input>{safe}</input></root>'
+        validity = "valid"
+        metrics = {"depth": 2, "width": width, "fields": width}
+    elif structure == "truncated":
+        body = f'<?xml version="1.0"?><root><input>{safe}</input>'
+        validity = "invalid"
+        metrics = {"depth": 2, "width": 1, "fields": 1}
+    else:
+        raise ValueError(f"Unsupported XML structure: {structure}")
+    return Document(body, "application/xml", structure, validity, metrics)
 
-def swap_case(s: str) -> str:
-    return s.swapcase()
 
-def insert_null_bytes(s: str, step: int = 3) -> str:
-    """Вставляет \\x00 после каждого step-го символа."""
-    chars = []
-    for i, ch in enumerate(s):
-        chars.append(ch)
-        if (i + 1) % step == 0:
-            chars.append('\\x00')
-    return ''.join(chars)
+def build_multipart(value: str, structure: str, fields: int, boundary: str) -> Document:
+    line = "\r\n"
+    parts: list[str] = []
+    count = 1 if structure == "single" else fields
+    for index in range(count):
+        name = "input" if structure == "single" else f"field_{index}"
+        parts.extend([
+            f"--{boundary}",
+            f'Content-Disposition: form-data; name="{name}"',
+            "",
+            value if structure == "single" else f"{value}-{index}",
+        ])
+    parts.append(f"--{boundary}--")
+    parts.append("")
+    body = line.join(parts)
+    validity = "valid"
+    if structure == "missing-close":
+        body = body.rsplit(f"--{boundary}--", 1)[0]
+        validity = "invalid"
+    elif structure == "lf-only":
+        body = body.replace("\r\n", "\n")
+    return Document(body, f"multipart/form-data; boundary={boundary}", structure, validity, {"fields": count, "depth": 1, "width": count})
 
-def add_tabs(s: str) -> str:
-    """Заменяет пробелы на табуляции."""
-    return s.replace(' ', '\t')
 
-def wrap_compression(name: str, compress_func: Callable[[bytes], bytes]) -> Callable[[str], str]:
-    """Обёртка для преобразований сжатия: принимает строку, возвращает base64."""
-    def wrapper(s: str) -> str:
-        data = s.encode('utf-8')
-        compressed = compress_func(data)
-        return base64.b64encode(compressed).decode('ascii')
-    return wrapper
+def build_document(fmt: str, value: str, structure: str, depth: int, width: int, fields: int, boundary: str) -> Document:
+    if fmt == "json":
+        return build_json(value, structure, depth, width, fields)
+    if fmt == "form":
+        return build_form(value, structure, fields)
+    if fmt == "xml":
+        return build_xml(value, structure, depth, width)
+    if fmt == "multipart":
+        return build_multipart(value, structure, fields, boundary)
+    if fmt == "text":
+        return Document(value, "text/plain", "single", "valid", {"depth": 1, "width": 1, "fields": 1})
+    if fmt == "octet-stream":
+        return Document(value.encode("utf-8"), "application/octet-stream", "single", "valid", {"depth": 1, "width": 1, "fields": 1})
+    raise ValueError(f"Unsupported format: {fmt}")
 
-# ---------- Список всех доступных преобразований ----------
-TRANSFORMS: List[Tuple[str, Callable[[str], str]]] = [
-    ('original', lambda s: s),
 
-    # Кодировки
-    ('url', lambda s: urllib.parse.quote(s, safe='')),
-    ('double_url', lambda s: urllib.parse.quote(urllib.parse.quote(s, safe=''), safe='')),
-    ('html_entities', lambda s: ''.join(f'&#{ord(c)};' for c in s)),
-    ('unicode_escape', lambda s: ''.join(f'\\u{ord(c):04x}' for c in s)),
-    ('base64', lambda s: base64.b64encode(s.encode('utf-8')).decode('ascii')),
-    ('base64url', lambda s: base64.urlsafe_b64encode(s.encode('utf-8')).decode('ascii')),
-    ('hex', lambda s: s.encode('utf-8').hex()),
-    ('utf16le_hex', lambda s: s.encode('utf-16le').hex()),
-    ('utf16be_hex', lambda s: s.encode('utf-16be').hex()),
-    ('js_escape', escape_js),
+STRUCTURES = {
+    "json": ["single", "deep", "wide", "array", "many-fields", "duplicate-keys", "truncated", "trailing-garbage"],
+    "form": ["single", "many-fields", "repeated-keys", "empty-pairs", "invalid-percent"],
+    "xml": ["single", "deep", "wide", "attributes", "truncated"],
+    "multipart": ["single", "many-fields", "missing-close", "lf-only"],
+    "text": ["single"],
+    "octet-stream": ["single"],
+}
 
-    # Обфускации
-    ('lower', lambda s: s.lower()),
-    ('upper', lambda s: s.upper()),
-    ('swap_case', swap_case),
-    ('random_case', lambda s: random_case(s, seed=42)),
-    ('sql_comments', add_sql_comments),
-    ('null_bytes', insert_null_bytes),
-    ('tabs', add_tabs),
 
-    # Сжатие (возвращают base64)
-    ('gzip', wrap_compression('gzip', compress_gzip)),
-]
+def iter_cases(args: argparse.Namespace) -> Iterable[dict[str, Any]]:
+    case_number = 0
+    compressions = list(args.compressions)
+    if brotli is None and "br" in compressions:
+        compressions.remove("br")
+        print("Warning: brotli is unavailable; br cases are skipped.")
 
-if HAS_BROTLI:
-    TRANSFORMS.append(('brotli', wrap_compression('brotli', compress_brotli)))
-else:
-    print("Info: Brotli compression skipped due to missing module.")
+    for fmt in args.formats:
+        for structure in STRUCTURES[fmt]:
+            for charset in args.charsets:
+                if fmt == "octet-stream" and charset != "utf-8":
+                    continue
+                for bom in args.bom:
+                    if bom and charset not in {"utf-8", "utf-16le", "utf-16be", "utf-32le", "utf-32be"}:
+                        continue
+                    for filler_kind in args.filler_kinds:
+                        for requested_size in args.sizes:
+                            logical_value = make_filler(requested_size, filler_kind, args.seed) + args.payload
+                            boundary = f"----WAFPayloadBoundary{args.seed:08d}"
+                            document = build_document(fmt, logical_value, structure, args.depth, args.width, args.fields, boundary)
+                            serialized = document.body if isinstance(document.body, bytes) else encode_text(document.body, charset, bom=bom)
 
-TRANSFORMS.append(('deflate', wrap_compression('deflate', compress_deflate)))
+                            for compression in compressions:
+                                compressed = compress_body(serialized, compression)
+                                corruption_modes = ["valid"]
+                                if compression != "none" and args.include_corrupt_compression:
+                                    corruption_modes += ["truncated", "bad-tail", "bitflip"]
 
-# ---------- Генерация последовательностей ----------
-def generate_sequences(transforms: List[Tuple[str, Callable]], max_len: int) -> List[List[str]]:
-    """Генерирует все последовательности имён преобразований длины от 1 до max_len (без повторений)."""
-    names = [name for name, _ in transforms]
-    combos = []
-    for length in range(1, max_len + 1):
-        for combo in itertools.permutations(names, length):
-            combos.append(list(combo))
-    return combos
+                                for corruption in corruption_modes:
+                                    wire_body = corrupt_compressed(compressed, corruption)
+                                    case_number += 1
+                                    case_id = f"case-{case_number:06d}-{fmt}-{structure}-{charset}-{compression}-{corruption}"
+                                    headers = {
+                                        "Content-Type": document.media_type if fmt in {"octet-stream", "multipart"} else f"{document.media_type}; charset={charset}",
+                                        "X-WAF-Test-Case-ID": case_id,
+                                    }
+                                    if compression != "none":
+                                        headers["Content-Encoding"] = "deflate" if compression == "raw-deflate" else compression
+                                    metadata = {
+                                        "format": fmt,
+                                        "structure": document.structure,
+                                        "validity": document.validity if corruption == "valid" else "invalid-compression",
+                                        "charset": charset,
+                                        "bom": bom,
+                                        "filler_kind": filler_kind,
+                                        "requested_filler_chars": requested_size,
+                                        "compression": compression,
+                                        "compression_corruption": corruption,
+                                        "seed": args.seed,
+                                        **document.metrics,
+                                    }
+                                    yield {
+                                        "id": case_id,
+                                        "method": "POST",
+                                        "path": args.path,
+                                        "headers": headers,
+                                        "body_base64": base64.b64encode(wire_body).decode("ascii"),
+                                        "sha256": hashlib.sha256(wire_body).hexdigest(),
+                                        "logical_size": len(logical_value.encode("utf-8")),
+                                        "serialized_size": len(serialized),
+                                        "wire_body_size": len(wire_body),
+                                        "expansion_ratio": round(len(serialized) / max(1, len(wire_body)), 4),
+                                        "metadata": metadata,
+                                    }
 
-def apply_sequence(seq: List[str], base_payload: str, func_map: dict) -> str:
-    """Применяет последовательность преобразований к строке."""
-    result = base_payload
-    for name in seq:
-        result = func_map[name](result)
-    return result
 
-# ---------- Основная функция ----------
-def main():
-    parser = argparse.ArgumentParser(
-        description='Генератор вариантов пейлоадов для тестирования WAF'
-    )
-    parser.add_argument(
-        '--payload',
-        default="' OR '1'='1' -- ",
-        help='Базовый пейлоад (по умолчанию SQLi)'
-    )
-    parser.add_argument(
-        '--output',
-        default='payloads.json',
-        help='Выходной JSON-файл'
-    )
-    parser.add_argument(
-        '--max-combinations',
-        type=int,
-        default=2,
-        choices=[1, 2, 3],
-        help='Максимальная длина комбинации преобразований (1-3)'
-    )
-    parser.add_argument(
-        '--sizes',
-        type=int,
-        nargs='+',
-        default=[0, 100, 500, 1000, 2000, 5000, 10000, 20000, 50000],
-        help='Ступени размера префикса (в байтах)'
-    )
-    parser.add_argument(
-        '--order',
-        choices=['encode-then-pad', 'pad-then-encode'],
-        default='encode-then-pad',
-        help='Порядок применения расширения и кодирования'
-    )
-    args = parser.parse_args()
+def parse_bool(value: str) -> bool:
+    return value.lower() in {"1", "true", "yes"}
 
-    base_payload = args.payload
-    max_len = args.max_combinations
-    sizes = args.sizes
-    output_file = args.output
-    order = args.order
 
-    func_map = {name: func for name, func in TRANSFORMS}
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Generate byte-exact WAF request cases")
+    parser.add_argument("--output", default="payloads.json", help="Output JSON manifest")
+    parser.add_argument("--payload", default="normal-client-value", help="Suffix included in every logical value")
+    parser.add_argument("--path", default="/endpoint", help="Request path stored in every case")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--sizes", type=int, nargs="+", default=[0, 100, 1000, 10000])
+    parser.add_argument("--formats", nargs="+", choices=list(STRUCTURES), default=list(STRUCTURES))
+    parser.add_argument("--charsets", nargs="+", default=["utf-8", "utf-16le", "utf-16be"])
+    parser.add_argument("--compressions", nargs="+", choices=["none", "gzip", "deflate", "raw-deflate", "br"], default=["none", "gzip", "deflate"])
+    parser.add_argument("--filler-kinds", nargs="+", choices=["repeated", "random-ascii", "unicode", "numeric"], default=["repeated", "random-ascii", "unicode"])
+    parser.add_argument("--bom", nargs="+", type=parse_bool, default=[False, True], metavar="BOOL")
+    parser.add_argument("--depth", type=int, default=64)
+    parser.add_argument("--width", type=int, default=256)
+    parser.add_argument("--fields", type=int, default=512)
+    parser.add_argument("--include-corrupt-compression", action="store_true")
+    return parser.parse_args()
 
-    # Генерируем последовательности (без повторений)
-    sequences = generate_sequences(TRANSFORMS, max_len)
-    print(f"Сгенерировано {len(sequences)} последовательностей преобразований.")
 
-    results = []
+def main() -> None:
+    args = parse_args()
+    cases = list(iter_cases(args))
+    output = Path(args.output)
+    output.write_text(json.dumps(cases, ensure_ascii=False, indent=2), encoding="utf-8")
+    valid = sum(case["metadata"]["validity"] == "valid" for case in cases)
+    invalid = len(cases) - valid
+    print(f"Generated {len(cases)} cases in {output} ({valid} valid, {invalid} invalid)")
 
-    for seq in sequences:
-        # Определяем, есть ли сжатие в последовательности (берём последнее)
-        compression_type = None
-        for name in reversed(seq):
-            if name in ('gzip', 'brotli', 'deflate'):
-                compression_type = name
-                break
-        is_compressed = compression_type is not None
 
-        # Имя последовательности
-        name_prefix = '+'.join(seq)
-
-        for size in sizes:
-            if size == 0:
-                prefix = ""
-                size_name = ""
-            else:
-                prefix = 'A' * size
-                size_name = f"_size{size}"
-
-            if order == 'encode-then-pad':
-                # 1. Применяем преобразования к исходному пейлоаду
-                transformed = apply_sequence(seq, base_payload, func_map)
-                # 2. Добавляем префикс
-                payload_final = prefix + transformed
-            else:  # 'pad-then-encode'
-                # 1. Добавляем префикс к исходному пейлоаду
-                extended = prefix + base_payload
-                # 2. Применяем преобразования к расширенной строке
-                payload_final = apply_sequence(seq, extended, func_map)
-
-            # Вычисляем размер в байтах (UTF-8)
-            byte_size = len(payload_final.encode('utf-8'))
-
-            results.append({
-                'name': name_prefix + size_name,
-                'payload': payload_final,
-                'size': byte_size,
-                'encodings': seq + ([f'size_{size}'] if size > 0 else []),
-                'is_compressed': is_compressed,
-                'compression': compression_type,  # может быть None
-            })
-
-    # Сортируем для удобства
-    results.sort(key=lambda x: x['name'])
-
-    # Сохраняем JSON
-    with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(results, f, ensure_ascii=False, indent=2)
-
-    print(f"Сохранено {len(results)} вариантов в {output_file}")
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
