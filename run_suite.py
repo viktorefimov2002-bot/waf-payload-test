@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-"""Run generated WAF request cases sequentially and preserve reproducible evidence."""
+"""Run WAF request cases sequentially with compact evidence logging."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
-from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
 
 def utc_now() -> str:
@@ -35,6 +35,30 @@ def atomic_write_json(path: Path, value: Any) -> None:
     temporary.replace(path)
 
 
+def metric_value(summary: dict[str, Any], metric: str, field: str) -> float | None:
+    value = summary.get("metrics", {}).get(metric, {}).get("values", {}).get(field)
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def compact_summary(summary_path: Path) -> dict[str, float | None]:
+    if not summary_path.exists():
+        return {}
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {
+        "http_reqs": metric_value(summary, "http_reqs", "count"),
+        "http_req_failed_rate": metric_value(summary, "http_req_failed", "rate"),
+        "http_req_duration_p95_ms": metric_value(summary, "http_req_duration", "p(95)"),
+        "http_req_duration_max_ms": metric_value(summary, "http_req_duration", "max"),
+        "dropped_iterations": metric_value(summary, "dropped_iterations", "count"),
+        "checks_rate": metric_value(summary, "checks", "rate"),
+        "data_sent_bytes": metric_value(summary, "data_sent", "count"),
+        "data_received_bytes": metric_value(summary, "data_received", "count"),
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Sequentially run WAF payload cases with k6")
     parser.add_argument("--target", required=True, help="Base target URL, e.g. https://waf.example")
@@ -46,73 +70,49 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start-index", type=int, default=0)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--results-dir", default="results")
-    parser.add_argument("--stop-on-failure", action="store_true")
     parser.add_argument("--preallocated-vus", type=int)
     parser.add_argument("--max-vus", type=int)
-    parser.add_argument("--retry-suspicious", type=int, default=1, help="Additional attempts for suspicious cases")
-    parser.add_argument("--retry-cooldown", type=float, default=10.0)
-    parser.add_argument("--recent-history", type=int, default=10, help="Number of latest cases written to active_cases.json")
-    parser.add_argument("--health-url", help="Optional URL checked before and after each case")
-    parser.add_argument("--health-timeout", type=float, default=5.0)
-    parser.add_argument("--health-expected", type=int, nargs="+", default=[200, 204, 301, 302, 401, 403])
-    parser.add_argument("--health-retries", type=int, default=3)
-    parser.add_argument("--suspicious-status-rate", type=float, default=0.01, help="Failure-rate threshold parsed from k6 summary")
+    parser.add_argument("--terminate-timeout", type=float, default=10.0, help="Seconds to wait for k6 after Ctrl+C")
     return parser.parse_args()
 
 
-def health_check(url: str | None, timeout: float, expected: set[int], retries: int) -> dict[str, Any]:
-    if not url:
-        return {"configured": False, "ok": True}
-    last: dict[str, Any] = {"configured": True, "ok": False}
-    for attempt in range(1, retries + 1):
+def terminate_process(process: subprocess.Popen[Any], timeout: float) -> None:
+    if process.poll() is not None:
+        return
+    process.send_signal(signal.SIGINT)
+    try:
+        process.wait(timeout=max(0.1, timeout))
+    except subprocess.TimeoutExpired:
+        process.terminate()
         try:
-            request = Request(url, method="GET", headers={"User-Agent": "waf-payload-test-health/1.0"})
-            with urlopen(request, timeout=timeout) as response:
-                status = response.status
-            last = {"configured": True, "ok": status in expected, "status": status, "attempt": attempt}
-        except HTTPError as exc:
-            last = {"configured": True, "ok": exc.code in expected, "status": exc.code, "attempt": attempt}
-        except (URLError, TimeoutError, OSError) as exc:
-            last = {"configured": True, "ok": False, "error": str(exc), "attempt": attempt}
-        if last["ok"]:
-            return last
-        if attempt < retries:
-            time.sleep(1.0)
-    return last
+            process.wait(timeout=3.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
 
 
-def metric_value(summary: dict[str, Any], metric: str, field: str) -> float | None:
-    value = summary.get("metrics", {}).get(metric, {}).get("values", {}).get(field)
-    return float(value) if isinstance(value, (int, float)) else None
-
-
-def classify_attempt(exit_code: int, summary_path: Path, health_after: dict[str, Any], threshold: float) -> dict[str, Any]:
-    reasons: list[str] = []
-    metrics: dict[str, float | None] = {}
-    if exit_code != 0:
-        reasons.append(f"k6-exit-{exit_code}")
-    if not health_after.get("ok", True):
-        reasons.append("health-check-failed")
+def preserve_interrupted_artifacts(
+    results_dir: Path,
+    case: dict[str, Any],
+    index: int,
+    started_at: str,
+    summary_path: Path,
+    stdout_path: Path,
+    stderr_path: Path,
+) -> None:
+    interrupted = results_dir / "interrupted"
+    interrupted.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(interrupted / "request.json", {
+        "index": index,
+        "started_at": started_at,
+        "request": case,
+    })
     if summary_path.exists():
-        try:
-            summary = json.loads(summary_path.read_text(encoding="utf-8"))
-            metrics = {
-                "http_req_failed_rate": metric_value(summary, "http_req_failed", "rate"),
-                "dropped_iterations": metric_value(summary, "dropped_iterations", "count"),
-                "checks_rate": metric_value(summary, "checks", "rate"),
-                "http_req_duration_p95": metric_value(summary, "http_req_duration", "p(95)"),
-            }
-            failure_rate = metrics["http_req_failed_rate"]
-            if failure_rate is not None and failure_rate >= threshold:
-                reasons.append("http-failure-rate")
-            dropped = metrics["dropped_iterations"]
-            if dropped is not None and dropped > 0:
-                reasons.append("dropped-iterations")
-        except (OSError, json.JSONDecodeError, ValueError) as exc:
-            reasons.append(f"summary-unreadable:{exc}")
-    else:
-        reasons.append("summary-missing")
-    return {"suspicious": bool(reasons), "reasons": reasons, "metrics": metrics}
+        shutil.copy2(summary_path, interrupted / "k6-summary.json")
+    if stdout_path.exists():
+        shutil.copy2(stdout_path, interrupted / "stdout.log")
+    if stderr_path.exists():
+        shutil.copy2(stderr_path, interrupted / "stderr.log")
 
 
 def main() -> int:
@@ -134,133 +134,187 @@ def main() -> int:
     results_dir = Path(args.results_dir) / run_id
     results_dir.mkdir(parents=True, exist_ok=False)
     journal = results_dir / "run.jsonl"
-    active_path = results_dir / "active_cases.json"
-    suspicious_path = results_dir / "suspicious_cases.jsonl"
-    recent: deque[dict[str, Any]] = deque(maxlen=max(1, args.recent_history))
+    active_path = results_dir / "active_case.json"
 
     run_config = {
         "run_id": run_id,
         "target": args.target,
-        "health_url": args.health_url,
         "rps": args.rps,
         "duration": args.duration,
         "cooldown": args.cooldown,
         "start_index": args.start_index,
         "end_index_exclusive": end,
         "payload_file": str(payload_path),
-        "payload_manifest_sha256": __import__("hashlib").sha256(payload_path.read_bytes()).hexdigest(),
+        "payload_manifest_sha256": hashlib.sha256(payload_path.read_bytes()).hexdigest(),
         "k6_script": str(script_path),
-        "retry_suspicious": args.retry_suspicious,
+        "storage_mode": "compact",
+        "automatic_retry": False,
+        "automatic_stop": False,
     }
     atomic_write_json(results_dir / "run_config.json", run_config)
     append_jsonl(journal, {"event": "RUN_START", "timestamp": utc_now(), **run_config})
 
-    failures = 0
-    suspicious_count = 0
-    health_expected = set(args.health_expected)
+    completed_cases = 0
+    nonzero_exit_codes = 0
+    current_process: subprocess.Popen[Any] | None = None
+    current_case: dict[str, Any] | None = None
+    current_index: int | None = None
+    current_started_at: str | None = None
+    current_temp_paths: tuple[Path, Path, Path] | None = None
 
-    for index in selected:
-        case = cases[index]
-        case_id = case.get("id", f"index-{index}")
-        recent.append({"index": index, "case_id": case_id, "sha256": case.get("sha256"), "timestamp": utc_now()})
-        atomic_write_json(active_path, {"run_id": run_id, "currently_active": recent[-1], "recent": list(recent)})
+    try:
+        with tempfile.TemporaryDirectory(prefix=f"waf-payload-{run_id}-") as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            for index in selected:
+                case = cases[index]
+                case_id = case.get("id", f"index-{index}")
+                started_at = utc_now()
+                current_case = case
+                current_index = index
+                current_started_at = started_at
 
-        health_before = health_check(args.health_url, args.health_timeout, health_expected, args.health_retries)
-        append_jsonl(journal, {"event": "HEALTH_BEFORE", "timestamp": utc_now(), "index": index, "case_id": case_id, **health_before})
-        if not health_before.get("ok", True):
-            failures += 1
-            append_jsonl(suspicious_path, {"timestamp": utc_now(), "index": index, "case_id": case_id, "reason": "health-failed-before-case"})
-            if args.stop_on_failure:
-                break
+                start_record = {
+                    "event": "CASE_START",
+                    "timestamp": started_at,
+                    "run_id": run_id,
+                    "index": index,
+                    "case_id": case_id,
+                    "sha256": case.get("sha256"),
+                    "wire_body_size": case.get("wire_body_size"),
+                    "metadata": case.get("metadata"),
+                }
+                atomic_write_json(active_path, {
+                    "run_id": run_id,
+                    "active": start_record,
+                    "completed": False,
+                })
+                append_jsonl(journal, start_record)
+                print(json.dumps(start_record, ensure_ascii=False), flush=True)
 
-        maximum_attempts = 1 + max(0, args.retry_suspicious)
-        case_suspicious = False
-        for attempt in range(1, maximum_attempts + 1):
-            stem = f"{index:06d}-{case_id}-attempt{attempt}"
-            summary_path = results_dir / f"{stem}.summary.json"
-            stdout_path = results_dir / f"{stem}.stdout.log"
-            stderr_path = results_dir / f"{stem}.stderr.log"
-            start_record = {
-                "event": "CASE_START",
-                "timestamp": utc_now(),
+                summary_path = temp_dir / "current.summary.json"
+                stdout_path = temp_dir / "current.stdout.log"
+                stderr_path = temp_dir / "current.stderr.log"
+                for path in (summary_path, stdout_path, stderr_path):
+                    path.unlink(missing_ok=True)
+                current_temp_paths = (summary_path, stdout_path, stderr_path)
+
+                env = os.environ.copy()
+                env.update({
+                    "TARGET_URL": args.target,
+                    "PAYLOAD_FILE": str(payload_path),
+                    "PAYLOAD_INDEX": str(index),
+                    "RUN_ID": run_id,
+                    "RPS": str(args.rps),
+                    "DURATION": args.duration,
+                })
+                if args.preallocated_vus is not None:
+                    env["PREALLOCATED_VUS"] = str(args.preallocated_vus)
+                if args.max_vus is not None:
+                    env["MAX_VUS"] = str(args.max_vus)
+
+                command = ["k6", "run", "--summary-export", str(summary_path), str(script_path)]
+                monotonic_started = time.monotonic()
+                with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
+                    current_process = subprocess.Popen(command, env=env, stdout=stdout, stderr=stderr)
+                    exit_code = current_process.wait()
+                elapsed = time.monotonic() - monotonic_started
+                current_process = None
+
+                metrics = compact_summary(summary_path)
+                end_record = {
+                    "event": "CASE_END",
+                    "timestamp": utc_now(),
+                    "run_id": run_id,
+                    "index": index,
+                    "case_id": case_id,
+                    "exit_code": exit_code,
+                    "elapsed_seconds": round(elapsed, 3),
+                    "metrics": metrics,
+                }
+                append_jsonl(journal, end_record)
+                print(json.dumps(end_record, ensure_ascii=False), flush=True)
+                completed_cases += 1
+                if exit_code != 0:
+                    nonzero_exit_codes += 1
+
+                atomic_write_json(active_path, {
+                    "run_id": run_id,
+                    "active": None,
+                    "last_completed": end_record,
+                    "completed": False,
+                })
+                for path in (summary_path, stdout_path, stderr_path):
+                    path.unlink(missing_ok=True)
+                current_case = None
+                current_index = None
+                current_started_at = None
+                current_temp_paths = None
+
+                if args.cooldown > 0:
+                    time.sleep(args.cooldown)
+
+    except KeyboardInterrupt:
+        if current_process is not None:
+            terminate_process(current_process, args.terminate_timeout)
+        interrupted_at = utc_now()
+        if current_case is not None and current_index is not None and current_started_at is not None:
+            if current_temp_paths is not None:
+                preserve_interrupted_artifacts(
+                    results_dir,
+                    current_case,
+                    current_index,
+                    current_started_at,
+                    *current_temp_paths,
+                )
+            interruption = {
+                "event": "RUN_INTERRUPTED",
+                "timestamp": interrupted_at,
                 "run_id": run_id,
-                "index": index,
-                "attempt": attempt,
-                "case_id": case_id,
-                "sha256": case.get("sha256"),
-                "wire_body_size": case.get("wire_body_size"),
-                "metadata": case.get("metadata"),
+                "reason": "SIGINT",
+                "active_index": current_index,
+                "active_case_id": current_case.get("id", f"index-{current_index}"),
+                "active_case_sha256": current_case.get("sha256"),
             }
-            append_jsonl(journal, start_record)
-            print(json.dumps(start_record, ensure_ascii=False), flush=True)
-
-            env = os.environ.copy()
-            env.update({
-                "TARGET_URL": args.target,
-                "PAYLOAD_FILE": str(payload_path),
-                "PAYLOAD_INDEX": str(index),
-                "RUN_ID": run_id,
-                "RPS": str(args.rps),
-                "DURATION": args.duration,
+            atomic_write_json(active_path, {
+                "run_id": run_id,
+                "active": {
+                    "index": current_index,
+                    "case_id": interruption["active_case_id"],
+                    "sha256": interruption["active_case_sha256"],
+                    "started_at": current_started_at,
+                },
+                "interrupted_at": interrupted_at,
+                "completed": False,
             })
-            if args.preallocated_vus is not None:
-                env["PREALLOCATED_VUS"] = str(args.preallocated_vus)
-            if args.max_vus is not None:
-                env["MAX_VUS"] = str(args.max_vus)
-
-            command = ["k6", "run", "--summary-export", str(summary_path), str(script_path)]
-            started = time.monotonic()
-            with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
-                result = subprocess.run(command, env=env, stdout=stdout, stderr=stderr, check=False)
-            elapsed = time.monotonic() - started
-            health_after = health_check(args.health_url, args.health_timeout, health_expected, args.health_retries)
-            classification = classify_attempt(result.returncode, summary_path, health_after, args.suspicious_status_rate)
-
-            end_record = {
-                "event": "CASE_END",
-                "timestamp": utc_now(),
+        else:
+            interruption = {
+                "event": "RUN_INTERRUPTED",
+                "timestamp": interrupted_at,
                 "run_id": run_id,
-                "index": index,
-                "attempt": attempt,
-                "case_id": case_id,
-                "exit_code": result.returncode,
-                "elapsed_seconds": round(elapsed, 3),
-                "health_after": health_after,
-                **classification,
-                "summary_file": str(summary_path),
-                "stdout_file": str(stdout_path),
-                "stderr_file": str(stderr_path),
+                "reason": "SIGINT",
+                "active_index": None,
+                "active_case_id": None,
             }
-            append_jsonl(journal, end_record)
-            print(json.dumps(end_record, ensure_ascii=False), flush=True)
+        append_jsonl(journal, interruption)
+        print(json.dumps(interruption, ensure_ascii=False), flush=True)
+        print(f"Interrupted results: {results_dir}")
+        return 130
 
-            if classification["suspicious"]:
-                case_suspicious = True
-                append_jsonl(suspicious_path, {**start_record, **end_record, "case": case})
-                atomic_write_json(results_dir / "last_suspicious_case.json", {"case": case, "result": end_record, "recent": list(recent)})
-                if attempt < maximum_attempts:
-                    time.sleep(max(0, args.retry_cooldown))
-                    continue
-            break
-
-        if case_suspicious:
-            suspicious_count += 1
-            failures += 1
-            if args.stop_on_failure:
-                break
-        if args.cooldown > 0:
-            time.sleep(args.cooldown)
-
-    atomic_write_json(active_path, {"run_id": run_id, "currently_active": None, "recent": list(recent), "completed": True})
+    atomic_write_json(active_path, {
+        "run_id": run_id,
+        "active": None,
+        "completed": True,
+        "completed_at": utc_now(),
+    })
     append_jsonl(journal, {
         "event": "RUN_END",
         "timestamp": utc_now(),
         "run_id": run_id,
-        "failures": failures,
-        "suspicious_cases": suspicious_count,
+        "completed_cases": completed_cases,
+        "nonzero_exit_codes": nonzero_exit_codes,
     })
     print(f"Results: {results_dir}")
-    return 1 if failures else 0
+    return 0
 
 
 if __name__ == "__main__":
