@@ -23,8 +23,7 @@ function durationSeconds(value) {
     const match = /^([0-9]+(?:\.[0-9]+)?)(ms|s|m|h)$/.exec(value);
     if (!match) throw new Error(`Unsupported duration: ${value}`);
     const amount = Number.parseFloat(match[1]);
-    const factors = { ms: 0.001, s: 1, m: 60, h: 3600 };
-    return amount * factors[match[2]];
+    return amount * ({ ms: 0.001, s: 1, m: 60, h: 3600 })[match[2]];
 }
 
 const thresholds = thresholdMode === 'strict' ? {
@@ -35,11 +34,8 @@ const thresholds = thresholdMode === 'strict' ? {
 export const options = batchMode ? {
     scenarios: {
         batch_payloads: {
-            executor: 'shared-iterations',
-            vus: 1,
-            iterations: 1,
-            maxDuration: __ENV.BATCH_MAX_DURATION || '24h',
-            gracefulStop,
+            executor: 'shared-iterations', vus: 1, iterations: 1,
+            maxDuration: __ENV.BATCH_MAX_DURATION || '24h', gracefulStop,
         },
     },
     thresholds,
@@ -47,21 +43,25 @@ export const options = batchMode ? {
 } : {
     scenarios: {
         single_payload: {
-            executor: 'constant-arrival-rate',
-            rate,
-            timeUnit: '1s',
-            duration,
-            gracefulStop,
-            preAllocatedVUs,
-            maxVUs,
+            executor: 'constant-arrival-rate', rate, timeUnit: '1s', duration,
+            gracefulStop, preAllocatedVUs, maxVUs,
         },
     },
     thresholds,
-    tags: {
-        test_run_id: __ENV.RUN_ID || 'manual',
-        payload_id: cases[0].id,
-    },
+    tags: { test_run_id: __ENV.RUN_ID || 'manual', payload_id: cases[0].id },
 };
+
+function event(name, currentCase, caseIndex, extra = {}) {
+    console.log(JSON.stringify({
+        event: name,
+        payload_index: caseIndex,
+        payload_id: currentCase.id,
+        sha256: currentCase.sha256,
+        wire_body_size: currentCase.wire_body_size,
+        metadata: currentCase.metadata,
+        ...extra,
+    }));
+}
 
 function sendCase(currentCase, caseIndex) {
     const body = encoding.b64decode(currentCase.body_base64, 'std');
@@ -70,8 +70,7 @@ function sendCase(currentCase, caseIndex) {
         'X-WAF-Test-Run-ID': __ENV.RUN_ID || 'manual',
         'X-WAF-Test-Sequence': String(caseIndex),
     };
-    const url = `${targetBase}${currentCase.path || ''}`;
-    const response = http.request(currentCase.method || 'POST', url, body, {
+    const response = http.request(currentCase.method || 'POST', `${targetBase}${currentCase.path || ''}`, body, {
         headers,
         tags: {
             payload_id: currentCase.id,
@@ -88,15 +87,8 @@ function sendCase(currentCase, caseIndex) {
 }
 
 export function setup() {
-    console.log(JSON.stringify({
-        event: 'K6_RUN_START',
-        first_index: firstIndex,
-        cases: cases.length,
-        rps: rate,
-        duration,
-        graceful_stop: gracefulStop,
-        threshold_mode: thresholdMode,
-    }));
+    console.log(JSON.stringify({ event: 'K6_RUN_START', first_index: firstIndex, cases: cases.length, rps: rate, duration, graceful_stop: gracefulStop, threshold_mode: thresholdMode }));
+    if (!batchMode) event('CASE_START', cases[0], firstIndex);
 }
 
 export default function () {
@@ -107,19 +99,13 @@ export default function () {
 
     const seconds = durationSeconds(duration);
     const interval = rate > 0 ? 1 / rate : 0;
+    const cooldown = Number.parseFloat(__ENV.COOLDOWN || '0');
     for (let offset = 0; offset < cases.length; offset += 1) {
         const currentCase = cases[offset];
         const caseIndex = firstIndex + offset;
         const started = Date.now();
         let requests = 0;
-        console.log(JSON.stringify({
-            event: 'CASE_START',
-            payload_index: caseIndex,
-            payload_id: currentCase.id,
-            sha256: currentCase.sha256,
-            wire_body_size: currentCase.wire_body_size,
-            metadata: currentCase.metadata,
-        }));
+        event('CASE_START', currentCase, caseIndex);
         while ((Date.now() - started) / 1000 < seconds) {
             const iterationStarted = Date.now();
             sendCase(currentCase, caseIndex);
@@ -127,22 +113,12 @@ export default function () {
             const remaining = interval - ((Date.now() - iterationStarted) / 1000);
             if (remaining > 0) sleep(remaining);
         }
-        console.log(JSON.stringify({
-            event: 'CASE_END',
-            payload_index: caseIndex,
-            payload_id: currentCase.id,
-            requests,
-            elapsed_seconds: (Date.now() - started) / 1000,
-        }));
-        const cooldown = Number.parseFloat(__ENV.COOLDOWN || '0');
+        event('CASE_END', currentCase, caseIndex, { requests, elapsed_seconds: (Date.now() - started) / 1000 });
         if (cooldown > 0 && offset + 1 < cases.length) sleep(cooldown);
     }
 }
 
 export function teardown() {
-    console.log(JSON.stringify({
-        event: 'K6_RUN_END',
-        first_index: firstIndex,
-        cases: cases.length,
-    }));
+    if (!batchMode) event('CASE_END', cases[0], firstIndex);
+    console.log(JSON.stringify({ event: 'K6_RUN_END', first_index: firstIndex, cases: cases.length }));
 }
