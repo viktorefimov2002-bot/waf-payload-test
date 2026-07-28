@@ -1,7 +1,6 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 import encoding from 'k6/encoding';
-import exec from 'k6/execution';
 
 const caseFile = __ENV.CASE_FILE || './current_case.json';
 const loaded = JSON.parse(open(caseFile));
@@ -34,8 +33,7 @@ function durationSeconds(value) {
 }
 
 function secondsDuration(value) {
-    const rounded = Math.round(value * 1000) / 1000;
-    return `${rounded}s`;
+    return `${Math.round(value * 1000) / 1000}s`;
 }
 
 const thresholds = thresholdMode === 'strict' ? {
@@ -161,9 +159,7 @@ export function setup() {
         preallocated_vus: preAllocatedVUs,
         max_vus: maxVUs,
     }));
-    if (!batchMode && !highRpsMode) {
-        event('CASE_START', cases[0], caseIndex(cases[0]));
-    }
+    if (!batchMode && !highRpsMode) event('CASE_START', cases[0], caseIndex(cases[0]));
 }
 
 export default function () {
@@ -187,17 +183,13 @@ export default function () {
             const remaining = interval - ((Date.now() - iterationStarted) / 1000);
             if (remaining > 0) sleep(remaining);
         }
-        event('CASE_END', currentCase, index, {
-            mode: 'fast',
-            requests,
-            elapsed_seconds: (Date.now() - started) / 1000,
-        });
+        event('CASE_END', currentCase, index, { mode: 'fast', requests, elapsed_seconds: (Date.now() - started) / 1000 });
         if (cooldown > 0 && offset + 1 < cases.length) sleep(cooldown);
     }
 }
 
 export function runHighRpsCase() {
-    const offset = Number.parseInt(exec.scenario.env.CASE_OFFSET, 10);
+    const offset = Number.parseInt(__ENV.CASE_OFFSET || '-1', 10);
     const currentCase = cases[offset];
     if (!currentCase) throw new Error(`No payload for CASE_OFFSET=${offset}`);
     sendCase(currentCase, caseIndex(currentCase, offset));
@@ -208,24 +200,14 @@ export function highRpsController() {
     for (let offset = 0; offset < cases.length; offset += 1) {
         const currentCase = cases[offset];
         const index = caseIndex(currentCase, offset);
-        event('CASE_START', currentCase, index, {
-            mode: 'high-rps',
-            target_rps: rate,
-            scheduled_duration: duration,
-        });
+        event('CASE_START', currentCase, index, { mode: 'high-rps', target_rps: rate, scheduled_duration: duration });
         sleep(seconds);
-        event('CASE_END', currentCase, index, {
-            mode: 'high-rps',
-            target_rps: rate,
-            scheduled_duration: duration,
-        });
+        event('CASE_END', currentCase, index, { mode: 'high-rps', target_rps: rate, scheduled_duration: duration });
         if (cooldown > 0 && offset + 1 < cases.length) sleep(cooldown);
     }
 }
 
 export function teardown() {
-    if (!batchMode && !highRpsMode) {
-        event('CASE_END', cases[0], caseIndex(cases[0]));
-    }
+    if (!batchMode && !highRpsMode) event('CASE_END', cases[0], caseIndex(cases[0]));
     console.log(JSON.stringify({ event: 'K6_RUN_END', cases: cases.length, mode: runMode }));
 }
