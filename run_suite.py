@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import json
 import os
@@ -33,6 +34,13 @@ def atomic_write_json(path: Path, value: Any) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(path)
+
+
+def archive_payload_manifest(source: Path, destination: Path) -> None:
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    with source.open("rb") as input_handle, gzip.open(temporary, "wb", compresslevel=6, mtime=0) as output_handle:
+        shutil.copyfileobj(input_handle, output_handle)
+    temporary.replace(destination)
 
 
 def metric_value(summary: dict[str, Any], metric: str, field: str) -> float | None:
@@ -135,6 +143,8 @@ def main() -> int:
     results_dir.mkdir(parents=True, exist_ok=False)
     journal = results_dir / "run.jsonl"
     active_path = results_dir / "active_case.json"
+    archived_payload_path = results_dir / "payloads.json.gz"
+    archive_payload_manifest(payload_path, archived_payload_path)
 
     run_config = {
         "run_id": run_id,
@@ -145,6 +155,7 @@ def main() -> int:
         "start_index": args.start_index,
         "end_index_exclusive": end,
         "payload_file": str(payload_path),
+        "archived_payload_file": str(archived_payload_path),
         "payload_manifest_sha256": hashlib.sha256(payload_path.read_bytes()).hexdigest(),
         "k6_script": str(script_path),
         "storage_mode": "compact",
