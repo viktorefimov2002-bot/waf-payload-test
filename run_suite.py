@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run WAF request cases sequentially with compact evidence logging."""
+"""Stream WAF request cases and run each through an isolated k6 process."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 
 def utc_now() -> str:
@@ -26,7 +26,7 @@ def utc_now() -> str:
 
 def append_jsonl(path: Path, record: dict[str, Any]) -> None:
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
         handle.flush()
 
 
@@ -36,12 +36,20 @@ def atomic_write_json(path: Path, value: Any) -> None:
     temporary.replace(path)
 
 
-def archive_payload_manifest(source: Path, destination: Path) -> None:
+def archive_manifest(source: Path, destination: Path) -> None:
     temporary = destination.with_suffix(destination.suffix + ".tmp")
     with source.open("rb") as input_handle, temporary.open("wb") as raw_output:
         with gzip.GzipFile(fileobj=raw_output, mode="wb", compresslevel=6, mtime=0) as output_handle:
             shutil.copyfileobj(input_handle, output_handle)
     temporary.replace(destination)
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def metric_value(summary: dict[str, Any], metric: str, field: str) -> float | None:
@@ -69,20 +77,95 @@ def compact_summary(summary_path: Path) -> dict[str, float | None]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Sequentially run WAF payload cases with k6")
+    parser = argparse.ArgumentParser(description="Sequentially run streamed WAF payload cases with k6")
     parser.add_argument("--target", required=True, help="Base target URL, e.g. https://waf.example")
-    parser.add_argument("--payload-file", default="payloads.json")
+    parser.add_argument("--payload-file", default="payloads.jsonl", help="JSONL manifest; legacy JSON arrays are also supported")
     parser.add_argument("--k6-script", default="k6_run_payloads.js")
     parser.add_argument("--rps", type=int, default=10)
     parser.add_argument("--duration", default="30s")
     parser.add_argument("--cooldown", type=float, default=5.0)
-    parser.add_argument("--start-index", type=int, default=0)
-    parser.add_argument("--limit", type=int)
+    parser.add_argument("--start-index", type=int, default=0, help="Zero-based source manifest index")
+    parser.add_argument("--limit", type=int, help="Maximum number of matching cases to execute")
+    parser.add_argument("--case-id", help="Execute only the exact case ID")
+    parser.add_argument("--format", dest="formats", action="append", help="Filter metadata.format; repeatable")
+    parser.add_argument("--structure", dest="structures", action="append", help="Filter metadata.structure; repeatable")
+    parser.add_argument("--value-encoding", dest="value_encodings", action="append", help="Filter metadata.value_encoding; repeatable")
+    parser.add_argument("--charset", dest="charsets", action="append", help="Filter metadata.charset; repeatable")
+    parser.add_argument("--compression", dest="compressions", action="append", help="Filter metadata.compression; repeatable")
+    parser.add_argument("--validity", dest="validities", action="append", choices=["valid", "invalid", "invalid-compression"], help="Filter metadata.validity; repeatable")
+    parser.add_argument("--list", action="store_true", help="Print matching case summaries without running k6")
     parser.add_argument("--results-dir", default="results")
     parser.add_argument("--preallocated-vus", type=int)
     parser.add_argument("--max-vus", type=int)
     parser.add_argument("--terminate-timeout", type=float, default=10.0)
     return parser.parse_args()
+
+
+def detect_manifest_format(path: Path) -> str:
+    with path.open("r", encoding="utf-8") as handle:
+        while True:
+            char = handle.read(1)
+            if not char:
+                raise ValueError("payload manifest is empty")
+            if not char.isspace():
+                return "json" if char == "[" else "jsonl"
+
+
+def iter_manifest(path: Path, manifest_format: str) -> Iterator[tuple[int, dict[str, Any]]]:
+    if manifest_format == "jsonl":
+        with path.open("r", encoding="utf-8") as handle:
+            source_index = 0
+            for line_number, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    case = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"invalid JSONL at line {line_number}: {exc}") from exc
+                if not isinstance(case, dict):
+                    raise ValueError(f"JSONL line {line_number} is not an object")
+                yield source_index, case
+                source_index += 1
+        return
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, list):
+        raise ValueError("legacy JSON manifest must be an array")
+    for source_index, case in enumerate(data):
+        if not isinstance(case, dict):
+            raise ValueError(f"JSON array item {source_index} is not an object")
+        yield source_index, case
+
+
+def matches_filter(value: Any, allowed: list[str] | None) -> bool:
+    return allowed is None or str(value) in allowed
+
+
+def case_matches(case: dict[str, Any], args: argparse.Namespace) -> bool:
+    if args.case_id and case.get("id") != args.case_id:
+        return False
+    metadata = case.get("metadata") or {}
+    return all((
+        matches_filter(metadata.get("format"), args.formats),
+        matches_filter(metadata.get("structure"), args.structures),
+        matches_filter(metadata.get("value_encoding"), args.value_encodings),
+        matches_filter(metadata.get("charset"), args.charsets),
+        matches_filter(metadata.get("compression"), args.compressions),
+        matches_filter(metadata.get("validity"), args.validities),
+    ))
+
+
+def selected_cases(path: Path, manifest_format: str, args: argparse.Namespace) -> Iterator[tuple[int, dict[str, Any]]]:
+    matched = 0
+    for source_index, case in iter_manifest(path, manifest_format):
+        if source_index < args.start_index:
+            continue
+        if not case_matches(case, args):
+            continue
+        yield source_index, case
+        matched += 1
+        if args.limit is not None and matched >= args.limit:
+            return
 
 
 def terminate_process(process: subprocess.Popen[Any], timeout: float) -> None:
@@ -100,52 +183,57 @@ def terminate_process(process: subprocess.Popen[Any], timeout: float) -> None:
             process.wait()
 
 
-def preserve_interrupted_artifacts(
-    results_dir: Path,
-    case: dict[str, Any],
-    index: int,
-    started_at: str,
-    summary_path: Path,
-    stdout_path: Path,
-    stderr_path: Path,
-) -> None:
+def preserve_interrupted_artifacts(results_dir: Path, case: dict[str, Any], index: int, started_at: str, paths: tuple[Path, Path, Path]) -> None:
     interrupted = results_dir / "interrupted"
     interrupted.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(interrupted / "request.json", {
-        "index": index,
-        "started_at": started_at,
-        "request": case,
-    })
-    for source, name in (
-        (summary_path, "k6-summary.json"),
-        (stdout_path, "stdout.log"),
-        (stderr_path, "stderr.log"),
-    ):
+    atomic_write_json(interrupted / "request.json", {"index": index, "started_at": started_at, "request": case})
+    for source, name in zip(paths, ("k6-summary.json", "stdout.log", "stderr.log")):
         if source.exists():
             shutil.copy2(source, interrupted / name)
 
 
 def main() -> int:
     args = parse_args()
-    if shutil.which("k6") is None:
-        print("ERROR: k6 executable was not found in PATH", file=sys.stderr)
+    if args.start_index < 0 or (args.limit is not None and args.limit < 1):
+        print("ERROR: --start-index must be >= 0 and --limit must be >= 1", file=sys.stderr)
         return 2
 
     payload_path = Path(args.payload_file).resolve()
     script_path = Path(args.k6_script).resolve()
-    cases = json.loads(payload_path.read_text(encoding="utf-8"))
-    if not isinstance(cases, list) or not cases:
-        print("ERROR: payload manifest is empty or invalid", file=sys.stderr)
+    if not payload_path.is_file() or not script_path.is_file():
+        print("ERROR: payload file or k6 script does not exist", file=sys.stderr)
         return 2
 
-    end = len(cases) if args.limit is None else min(len(cases), args.start_index + args.limit)
+    try:
+        manifest_format = detect_manifest_format(payload_path)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    if args.list:
+        count = 0
+        try:
+            for index, case in selected_cases(payload_path, manifest_format, args):
+                print(json.dumps({"index": index, "case_id": case.get("id"), "wire_body_size": case.get("wire_body_size"), "metadata": case.get("metadata")}, ensure_ascii=False))
+                count += 1
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
+        print(f"Matched cases: {count}", file=sys.stderr)
+        return 0 if count else 3
+
+    if shutil.which("k6") is None:
+        print("ERROR: k6 executable was not found in PATH", file=sys.stderr)
+        return 2
+
     run_id = f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}"
     results_dir = Path(args.results_dir) / run_id
     results_dir.mkdir(parents=True, exist_ok=False)
     journal = results_dir / "run.jsonl"
     active_path = results_dir / "active_case.json"
-    archived_payload_path = results_dir / "payloads.json.gz"
-    archive_payload_manifest(payload_path, archived_payload_path)
+    archive_name = "payloads.jsonl.gz" if manifest_format == "jsonl" else "payloads.json.gz"
+    archived_payload_path = results_dir / archive_name
+    archive_manifest(payload_path, archived_payload_path)
 
     run_config = {
         "run_id": run_id,
@@ -154,12 +242,22 @@ def main() -> int:
         "duration": args.duration,
         "cooldown": args.cooldown,
         "start_index": args.start_index,
-        "end_index_exclusive": end,
+        "limit": args.limit,
+        "case_id": args.case_id,
+        "filters": {
+            "format": args.formats,
+            "structure": args.structures,
+            "value_encoding": args.value_encodings,
+            "charset": args.charsets,
+            "compression": args.compressions,
+            "validity": args.validities,
+        },
         "payload_file": str(payload_path),
+        "payload_manifest_format": manifest_format,
         "archived_payload_file": str(archived_payload_path),
-        "payload_manifest_sha256": hashlib.sha256(payload_path.read_bytes()).hexdigest(),
+        "payload_manifest_sha256": file_sha256(payload_path),
         "k6_script": str(script_path),
-        "storage_mode": "compact",
+        "storage_mode": "compact-streaming",
         "automatic_retry": False,
         "automatic_stop": False,
     }
@@ -177,25 +275,21 @@ def main() -> int:
     try:
         with tempfile.TemporaryDirectory(prefix=f"waf-payload-{run_id}-") as temp_name:
             temp_dir = Path(temp_name)
-            for index in range(args.start_index, end):
-                case = cases[index]
+            case_file = temp_dir / "current_case.json"
+            for index, case in selected_cases(payload_path, manifest_format, args):
                 case_id = case.get("id", f"index-{index}")
                 started_at = utc_now()
                 current_case, current_index, current_started_at = case, index, started_at
                 start_record = {
-                    "event": "CASE_START",
-                    "timestamp": started_at,
-                    "run_id": run_id,
-                    "index": index,
-                    "case_id": case_id,
-                    "sha256": case.get("sha256"),
-                    "wire_body_size": case.get("wire_body_size"),
-                    "metadata": case.get("metadata"),
+                    "event": "CASE_START", "timestamp": started_at, "run_id": run_id,
+                    "index": index, "case_id": case_id, "sha256": case.get("sha256"),
+                    "wire_body_size": case.get("wire_body_size"), "metadata": case.get("metadata"),
                 }
                 atomic_write_json(active_path, {"run_id": run_id, "active": start_record, "completed": False})
                 append_jsonl(journal, start_record)
                 print(json.dumps(start_record, ensure_ascii=False), flush=True)
 
+                atomic_write_json(case_file, case)
                 summary_path = temp_dir / "current.summary.json"
                 stdout_path = temp_dir / "current.stdout.log"
                 stderr_path = temp_dir / "current.stderr.log"
@@ -205,12 +299,8 @@ def main() -> int:
 
                 env = os.environ.copy()
                 env.update({
-                    "TARGET_URL": args.target,
-                    "PAYLOAD_FILE": str(payload_path),
-                    "PAYLOAD_INDEX": str(index),
-                    "RUN_ID": run_id,
-                    "RPS": str(args.rps),
-                    "DURATION": args.duration,
+                    "TARGET_URL": args.target, "CASE_FILE": str(case_file), "CASE_INDEX": str(index),
+                    "RUN_ID": run_id, "RPS": str(args.rps), "DURATION": args.duration,
                 })
                 if args.preallocated_vus is not None:
                     env["PREALLOCATED_VUS"] = str(args.preallocated_vus)
@@ -225,71 +315,57 @@ def main() -> int:
                 current_process = None
 
                 end_record = {
-                    "event": "CASE_END",
-                    "timestamp": utc_now(),
-                    "run_id": run_id,
-                    "index": index,
-                    "case_id": case_id,
-                    "exit_code": exit_code,
-                    "elapsed_seconds": round(time.monotonic() - started, 3),
-                    "metrics": compact_summary(summary_path),
+                    "event": "CASE_END", "timestamp": utc_now(), "run_id": run_id,
+                    "index": index, "case_id": case_id, "exit_code": exit_code,
+                    "elapsed_seconds": round(time.monotonic() - started, 3), "metrics": compact_summary(summary_path),
                 }
                 append_jsonl(journal, end_record)
                 print(json.dumps(end_record, ensure_ascii=False), flush=True)
                 completed_cases += 1
                 nonzero_exit_codes += int(exit_code != 0)
-                atomic_write_json(active_path, {
-                    "run_id": run_id,
-                    "active": None,
-                    "last_completed": end_record,
-                    "completed": False,
-                })
+                atomic_write_json(active_path, {"run_id": run_id, "active": None, "last_completed": end_record, "completed": False})
                 for path in current_temp_paths:
                     path.unlink(missing_ok=True)
+                case_file.unlink(missing_ok=True)
                 current_case = current_index = current_started_at = current_temp_paths = None
                 if args.cooldown > 0:
                     time.sleep(args.cooldown)
 
+    except (ValueError, OSError) as exc:
+        append_jsonl(journal, {"event": "RUN_ERROR", "timestamp": utc_now(), "run_id": run_id, "error": str(exc)})
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
     except KeyboardInterrupt:
         if current_process is not None:
             terminate_process(current_process, args.terminate_timeout)
         interrupted_at = utc_now()
         interruption = {
-            "event": "RUN_INTERRUPTED",
-            "timestamp": interrupted_at,
-            "run_id": run_id,
-            "reason": "SIGINT",
+            "event": "RUN_INTERRUPTED", "timestamp": interrupted_at, "run_id": run_id, "reason": "SIGINT",
             "active_index": current_index,
             "active_case_id": current_case.get("id", f"index-{current_index}") if current_case is not None else None,
             "active_case_sha256": current_case.get("sha256") if current_case is not None else None,
         }
         if current_case is not None and current_index is not None and current_started_at is not None:
             if current_temp_paths is not None:
-                preserve_interrupted_artifacts(results_dir, current_case, current_index, current_started_at, *current_temp_paths)
+                preserve_interrupted_artifacts(results_dir, current_case, current_index, current_started_at, current_temp_paths)
             atomic_write_json(active_path, {
                 "run_id": run_id,
-                "active": {
-                    "index": current_index,
-                    "case_id": interruption["active_case_id"],
-                    "sha256": interruption["active_case_sha256"],
-                    "started_at": current_started_at,
-                },
-                "interrupted_at": interrupted_at,
-                "completed": False,
+                "active": {"index": current_index, "case_id": interruption["active_case_id"], "sha256": interruption["active_case_sha256"], "started_at": current_started_at},
+                "interrupted_at": interrupted_at, "completed": False,
             })
         append_jsonl(journal, interruption)
         print(json.dumps(interruption, ensure_ascii=False), flush=True)
         print(f"Interrupted results: {results_dir}")
         return 130
 
+    if completed_cases == 0:
+        append_jsonl(journal, {"event": "RUN_END", "timestamp": utc_now(), "run_id": run_id, "completed_cases": 0, "nonzero_exit_codes": 0, "no_matches": True})
+        atomic_write_json(active_path, {"run_id": run_id, "active": None, "completed": True, "completed_at": utc_now(), "no_matches": True})
+        print("No cases matched the selection", file=sys.stderr)
+        return 3
+
     atomic_write_json(active_path, {"run_id": run_id, "active": None, "completed": True, "completed_at": utc_now()})
-    append_jsonl(journal, {
-        "event": "RUN_END",
-        "timestamp": utc_now(),
-        "run_id": run_id,
-        "completed_cases": completed_cases,
-        "nonzero_exit_codes": nonzero_exit_codes,
-    })
+    append_jsonl(journal, {"event": "RUN_END", "timestamp": utc_now(), "run_id": run_id, "completed_cases": completed_cases, "nonzero_exit_codes": nonzero_exit_codes})
     print(f"Results: {results_dir}")
     return 0
 
