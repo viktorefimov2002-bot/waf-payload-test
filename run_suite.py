@@ -38,8 +38,9 @@ def atomic_write_json(path: Path, value: Any) -> None:
 
 def archive_payload_manifest(source: Path, destination: Path) -> None:
     temporary = destination.with_suffix(destination.suffix + ".tmp")
-    with source.open("rb") as input_handle, gzip.open(temporary, "wb", compresslevel=6, mtime=0) as output_handle:
-        shutil.copyfileobj(input_handle, output_handle)
+    with source.open("rb") as input_handle, temporary.open("wb") as raw_output:
+        with gzip.GzipFile(fileobj=raw_output, mode="wb", compresslevel=6, mtime=0) as output_handle:
+            shutil.copyfileobj(input_handle, output_handle)
     temporary.replace(destination)
 
 
@@ -80,7 +81,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--results-dir", default="results")
     parser.add_argument("--preallocated-vus", type=int)
     parser.add_argument("--max-vus", type=int)
-    parser.add_argument("--terminate-timeout", type=float, default=10.0, help="Seconds to wait for k6 after Ctrl+C")
+    parser.add_argument("--terminate-timeout", type=float, default=10.0)
     return parser.parse_args()
 
 
@@ -115,12 +116,13 @@ def preserve_interrupted_artifacts(
         "started_at": started_at,
         "request": case,
     })
-    if summary_path.exists():
-        shutil.copy2(summary_path, interrupted / "k6-summary.json")
-    if stdout_path.exists():
-        shutil.copy2(stdout_path, interrupted / "stdout.log")
-    if stderr_path.exists():
-        shutil.copy2(stderr_path, interrupted / "stderr.log")
+    for source, name in (
+        (summary_path, "k6-summary.json"),
+        (stdout_path, "stdout.log"),
+        (stderr_path, "stderr.log"),
+    ):
+        if source.exists():
+            shutil.copy2(source, interrupted / name)
 
 
 def main() -> int:
@@ -137,7 +139,6 @@ def main() -> int:
         return 2
 
     end = len(cases) if args.limit is None else min(len(cases), args.start_index + args.limit)
-    selected = range(args.start_index, end)
     run_id = f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}"
     results_dir = Path(args.results_dir) / run_id
     results_dir.mkdir(parents=True, exist_ok=False)
@@ -174,16 +175,13 @@ def main() -> int:
     current_temp_paths: tuple[Path, Path, Path] | None = None
 
     try:
-        with tempfile.TemporaryDirectory(prefix=f"waf-payload-{run_id}-") as temp_dir_name:
-            temp_dir = Path(temp_dir_name)
-            for index in selected:
+        with tempfile.TemporaryDirectory(prefix=f"waf-payload-{run_id}-") as temp_name:
+            temp_dir = Path(temp_name)
+            for index in range(args.start_index, end):
                 case = cases[index]
                 case_id = case.get("id", f"index-{index}")
                 started_at = utc_now()
-                current_case = case
-                current_index = index
-                current_started_at = started_at
-
+                current_case, current_index, current_started_at = case, index, started_at
                 start_record = {
                     "event": "CASE_START",
                     "timestamp": started_at,
@@ -194,20 +192,16 @@ def main() -> int:
                     "wire_body_size": case.get("wire_body_size"),
                     "metadata": case.get("metadata"),
                 }
-                atomic_write_json(active_path, {
-                    "run_id": run_id,
-                    "active": start_record,
-                    "completed": False,
-                })
+                atomic_write_json(active_path, {"run_id": run_id, "active": start_record, "completed": False})
                 append_jsonl(journal, start_record)
                 print(json.dumps(start_record, ensure_ascii=False), flush=True)
 
                 summary_path = temp_dir / "current.summary.json"
                 stdout_path = temp_dir / "current.stdout.log"
                 stderr_path = temp_dir / "current.stderr.log"
-                for path in (summary_path, stdout_path, stderr_path):
-                    path.unlink(missing_ok=True)
                 current_temp_paths = (summary_path, stdout_path, stderr_path)
+                for path in current_temp_paths:
+                    path.unlink(missing_ok=True)
 
                 env = os.environ.copy()
                 env.update({
@@ -224,14 +218,12 @@ def main() -> int:
                     env["MAX_VUS"] = str(args.max_vus)
 
                 command = ["k6", "run", "--summary-export", str(summary_path), str(script_path)]
-                monotonic_started = time.monotonic()
+                started = time.monotonic()
                 with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
                     current_process = subprocess.Popen(command, env=env, stdout=stdout, stderr=stderr)
                     exit_code = current_process.wait()
-                elapsed = time.monotonic() - monotonic_started
                 current_process = None
 
-                metrics = compact_summary(summary_path)
                 end_record = {
                     "event": "CASE_END",
                     "timestamp": utc_now(),
@@ -239,28 +231,22 @@ def main() -> int:
                     "index": index,
                     "case_id": case_id,
                     "exit_code": exit_code,
-                    "elapsed_seconds": round(elapsed, 3),
-                    "metrics": metrics,
+                    "elapsed_seconds": round(time.monotonic() - started, 3),
+                    "metrics": compact_summary(summary_path),
                 }
                 append_jsonl(journal, end_record)
                 print(json.dumps(end_record, ensure_ascii=False), flush=True)
                 completed_cases += 1
-                if exit_code != 0:
-                    nonzero_exit_codes += 1
-
+                nonzero_exit_codes += int(exit_code != 0)
                 atomic_write_json(active_path, {
                     "run_id": run_id,
                     "active": None,
                     "last_completed": end_record,
                     "completed": False,
                 })
-                for path in (summary_path, stdout_path, stderr_path):
+                for path in current_temp_paths:
                     path.unlink(missing_ok=True)
-                current_case = None
-                current_index = None
-                current_started_at = None
-                current_temp_paths = None
-
+                current_case = current_index = current_started_at = current_temp_paths = None
                 if args.cooldown > 0:
                     time.sleep(args.cooldown)
 
@@ -268,24 +254,18 @@ def main() -> int:
         if current_process is not None:
             terminate_process(current_process, args.terminate_timeout)
         interrupted_at = utc_now()
+        interruption = {
+            "event": "RUN_INTERRUPTED",
+            "timestamp": interrupted_at,
+            "run_id": run_id,
+            "reason": "SIGINT",
+            "active_index": current_index,
+            "active_case_id": current_case.get("id", f"index-{current_index}") if current_case is not None else None,
+            "active_case_sha256": current_case.get("sha256") if current_case is not None else None,
+        }
         if current_case is not None and current_index is not None and current_started_at is not None:
             if current_temp_paths is not None:
-                preserve_interrupted_artifacts(
-                    results_dir,
-                    current_case,
-                    current_index,
-                    current_started_at,
-                    *current_temp_paths,
-                )
-            interruption = {
-                "event": "RUN_INTERRUPTED",
-                "timestamp": interrupted_at,
-                "run_id": run_id,
-                "reason": "SIGINT",
-                "active_index": current_index,
-                "active_case_id": current_case.get("id", f"index-{current_index}"),
-                "active_case_sha256": current_case.get("sha256"),
-            }
+                preserve_interrupted_artifacts(results_dir, current_case, current_index, current_started_at, *current_temp_paths)
             atomic_write_json(active_path, {
                 "run_id": run_id,
                 "active": {
@@ -297,26 +277,12 @@ def main() -> int:
                 "interrupted_at": interrupted_at,
                 "completed": False,
             })
-        else:
-            interruption = {
-                "event": "RUN_INTERRUPTED",
-                "timestamp": interrupted_at,
-                "run_id": run_id,
-                "reason": "SIGINT",
-                "active_index": None,
-                "active_case_id": None,
-            }
         append_jsonl(journal, interruption)
         print(json.dumps(interruption, ensure_ascii=False), flush=True)
         print(f"Interrupted results: {results_dir}")
         return 130
 
-    atomic_write_json(active_path, {
-        "run_id": run_id,
-        "active": None,
-        "completed": True,
-        "completed_at": utc_now(),
-    })
+    atomic_write_json(active_path, {"run_id": run_id, "active": None, "completed": True, "completed_at": utc_now()})
     append_jsonl(journal, {
         "event": "RUN_END",
         "timestamp": utc_now(),
