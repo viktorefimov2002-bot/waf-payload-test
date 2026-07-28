@@ -135,12 +135,14 @@ Orchestrator:
 results/<run-id>/
 ├── run_config.json
 ├── run.jsonl
-└── active_case.json
+├── active_case.json
+└── payloads.json.gz
 ```
 
-- `run_config.json` — параметры запуска и SHA-256 manifest.
+- `run_config.json` — параметры запуска, путь к архивному manifest и SHA-256 исходного manifest.
 - `run.jsonl` — временная линия `RUN_START`, `CASE_START`, `CASE_END`, `RUN_END` или `RUN_INTERRUPTED`.
 - `active_case.json` — текущий либо последний активный кейс.
+- `payloads.json.gz` — неизменяемая сжатая копия manifest конкретного прогона. Она содержит все заголовки, `body_base64`, SHA-256 и metadata каждого кейса.
 
 Для каждого завершённого кейса из временного k6 summary в `CASE_END` переносятся только компактные метрики:
 
@@ -163,7 +165,7 @@ results/<run-id>/interrupted/
 └── stderr.log
 ```
 
-`request.json` содержит полный byte-exact кейс, включая заголовки, `body_base64`, SHA-256 и metadata. Его можно использовать для ручного воспроизведения.
+`request.json` содержит полный byte-exact кейс, включая заголовки, `body_base64`, SHA-256 и metadata.
 
 ## Поиск активного запроса по времени
 
@@ -183,6 +185,61 @@ results/<run-id>/interrupted/
 - `X-WAF-Test-Sequence`.
 
 Эти значения рекомендуется добавить в access/debug-логи WAF.
+
+## Поиск и воспроизведение кейса по case_id
+
+Используйте `payloads.json.gz` из нужной run-директории, а не текущий рабочий `payloads.json`. Это гарантирует, что повторяется именно manifest данного прогона.
+
+Посмотреть полный кейс:
+
+```bash
+gzip -cd results/<run-id>/payloads.json.gz |
+jq '.[] | select(.id == "case-000043-json-deep-utf-8-gzip-valid")'
+```
+
+Сохранить кейс отдельно:
+
+```bash
+gzip -cd results/<run-id>/payloads.json.gz |
+jq '.[] | select(.id == "case-000043-json-deep-utf-8-gzip-valid")' \
+  > request.json
+```
+
+Извлечь точное бинарное тело запроса:
+
+```bash
+gzip -cd results/<run-id>/payloads.json.gz |
+jq -r '.[] | select(.id == "case-000043-json-deep-utf-8-gzip-valid") | .body_base64' |
+base64 -d > request.body
+```
+
+Найти индекс кейса:
+
+```bash
+gzip -cd results/<run-id>/payloads.json.gz |
+jq 'to_entries[]
+    | select(.value.id == "case-000043-json-deep-utf-8-gzip-valid")
+    | .key'
+```
+
+Для повторного запуска сначала распакуйте архивный manifest:
+
+```bash
+gzip -cd results/<run-id>/payloads.json.gz > reproduced-payloads.json
+```
+
+Затем передайте найденный индекс в k6:
+
+```bash
+PAYLOAD_INDEX=42 \
+PAYLOAD_FILE=./reproduced-payloads.json \
+TARGET_URL=https://waf.example \
+RPS=1 \
+DURATION=30s \
+k6 run k6_run_payloads.js
+```
+
+Перед воспроизведением можно сверить SHA-256 тела из `run.jsonl` с полем `sha256` в архивном manifest.
 
 ## Контроль объёма корпуса
 
