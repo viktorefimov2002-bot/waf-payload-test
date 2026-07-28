@@ -22,11 +22,17 @@ python3 -m pip install brotli
 
 ## Генерация
 
+Минимальная команда:
+
 ```bash
 python3 payload_gen.py --output payloads.json
 ```
 
-По умолчанию создаются JSON, form-urlencoded, XML, multipart, text и octet-stream тела с несколькими charset, BOM, наполнителями, размерами и способами компрессии.
+По умолчанию используются только обычные значения (`plain`). Рекомендуемые дополнительные варианты кодирования включаются явно через:
+
+```bash
+--value-encoding-profile recommended
+```
 
 ### Покрываемые структуры
 
@@ -35,6 +41,91 @@ python3 payload_gen.py --output payloads.json
 - XML: одиночный элемент, глубокая вложенность, множество sibling-элементов, большое число атрибутов и усечённый документ.
 - Multipart: одиночная часть, множество частей, отсутствующий closing boundary и LF вместо CRLF.
 - Text и octet-stream: простые byte-exact тела для базового сравнения.
+
+### Варианты кодирования значений
+
+Рекомендуемый профиль применяет только осмысленные для конкретного формата комбинации:
+
+| Формат | Варианты |
+|---|---|
+| JSON | `plain`, `base64`, `url`, `json-unicode-escape` |
+| Form URL encoded | `plain`, `double-url`, `base64` |
+| XML | `plain`, `base64`, `url` |
+| Multipart | `plain`, `base64` |
+| Text | `plain`, `base64`, `url` |
+| Octet-stream | `plain`, `base64` |
+
+Особенности:
+
+- `body_base64` в manifest используется только для byte-exact хранения тела. Перед отправкой k6 декодирует его обратно в исходные байты.
+- `base64` как `value_encoding` означает, что само значение поля реально преобразовано в Base64 до сериализации документа.
+- `url` percent-кодирует значение перед помещением в JSON, XML или text.
+- `double-url` сначала percent-кодирует значение, после чего form-сериализация кодирует символ `%` ещё раз. Например `%2F` становится `%252F`.
+- `json-unicode-escape` создаёт JSON с последовательностями `\uXXXX` вместо непосредственных Unicode-символов.
+- Для специальной структуры `invalid-percent` используется только `plain`, поскольку её тело формируется как заранее заданная некорректная percent-последовательность.
+
+Включить рекомендуемый профиль:
+
+```bash
+python3 payload_gen.py \
+  --output payloads.json \
+  --value-encoding-profile recommended
+```
+
+Можно указать отдельные варианты вручную:
+
+```bash
+python3 payload_gen.py \
+  --output payloads.json \
+  --formats json xml text \
+  --value-encodings plain base64 url
+```
+
+Неподдерживаемые для конкретного формата комбинации при явном выборе не создаются. Для запуска по всем форматам удобнее использовать профиль `recommended`.
+
+### Оптимальная выборка
+
+Для первого полного sweep рекомендуется:
+
+```bash
+python3 payload_gen.py \
+  --output payloads.json \
+  --path /test-endpoint \
+  --formats json form xml multipart text octet-stream \
+  --sizes 0 100 1000 10000 \
+  --charsets utf-8 \
+  --compressions none gzip deflate raw-deflate \
+  --filler-kinds repeated random-ascii unicode \
+  --bom false \
+  --value-encoding-profile recommended \
+  --depth 64 \
+  --width 256 \
+  --fields 512
+```
+
+Эта команда создаёт **3504 кейса**:
+
+```text
+73 совместимых пары structure/value_encoding
+× 3 filler
+× 4 размера
+× 4 compression
+= 3504
+```
+
+### Полная штатная выборка
+
+Текущие значения по умолчанию с дополнительным рекомендуемым профилем:
+
+```bash
+python3 payload_gen.py \
+  --output payloads-full.json \
+  --value-encoding-profile recommended
+```
+
+Создаётся **7740 кейсов** без повреждённых compressed streams.
+
+Без `--value-encoding-profile recommended` прежняя plain-only выборка содержит **5040 кейсов**.
 
 ### Основные параметры генератора
 
@@ -45,6 +136,7 @@ python3 payload_gen.py \
   --charsets utf-8 utf-16le utf-16be \
   --compressions none gzip deflate raw-deflate \
   --filler-kinds repeated random-ascii unicode numeric \
+  --value-encoding-profile recommended \
   --depth 64 \
   --width 256 \
   --fields 512
@@ -58,24 +150,27 @@ python3 payload_gen.py \
   --include-corrupt-compression
 ```
 
-Добавляются режимы `truncated`, `bad-tail` и `bitflip`.
+Добавляются режимы `truncated`, `bad-tail` и `bitflip` для каждой сжатой версии.
 
 Каждый кейс содержит:
 
-- `logical_size`;
-- `serialized_size`;
-- `wire_body_size`;
+- `logical_size` — размер исходного логического значения;
+- `serialized_size` — размер документа после сериализации и charset;
+- `wire_body_size` — фактический размер HTTP-тела;
 - `expansion_ratio`;
 - SHA-256 тела;
-- metadata по формату, структуре, charset, валидности, глубине, ширине и числу полей.
+- `metadata.value_encoding`;
+- `metadata.encoded_value_utf8_size`;
+- metadata по формату, структуре, charset, BOM, валидности, глубине, ширине и числу полей.
 
 ## Пробный запуск одного кейса
 
 ```bash
 PAYLOAD_INDEX=0 \
+PAYLOAD_FILE=./payloads.json \
 TARGET_URL=https://waf.example \
-RPS=10 \
-DURATION=30s \
+RPS=1 \
+DURATION=5s \
 k6 run k6_run_payloads.js
 ```
 
@@ -84,9 +179,10 @@ k6 run k6_run_payloads.js
 ```bash
 python3 run_suite.py \
   --target https://waf.example \
-  --rps 10 \
-  --duration 30s \
-  --cooldown 5
+  --payload-file payloads.json \
+  --rps 1 \
+  --duration 5s \
+  --cooldown 2
 ```
 
 Suite проходит все выбранные кейсы независимо от HTTP-статусов, exit code k6 и локальных метрик. Автоматических retry и автоматической остановки нет.
@@ -100,12 +196,16 @@ python3 payload_gen.py \
   --sizes 0 100 \
   --charsets utf-8 \
   --compressions none gzip \
+  --filler-kinds repeated unicode \
+  --bom false \
+  --value-encoding-profile recommended \
   --depth 8 \
   --width 8 \
   --fields 8
 
 python3 run_suite.py \
   --target https://waf.example \
+  --payload-file payloads.json \
   --rps 1 \
   --duration 5s \
   --limit 10
@@ -113,11 +213,7 @@ python3 run_suite.py \
 
 ## Ручная остановка
 
-При обнаружении проблемы мониторингом WAF нажмите:
-
-```text
-Ctrl+C
-```
+При обнаружении проблемы мониторингом WAF нажмите `Ctrl+C`.
 
 Orchestrator:
 
@@ -142,18 +238,9 @@ results/<run-id>/
 - `run_config.json` — параметры запуска, путь к архивному manifest и SHA-256 исходного manifest.
 - `run.jsonl` — временная линия `RUN_START`, `CASE_START`, `CASE_END`, `RUN_END` или `RUN_INTERRUPTED`.
 - `active_case.json` — текущий либо последний активный кейс.
-- `payloads.json.gz` — неизменяемая сжатая копия manifest конкретного прогона. Она содержит все заголовки, `body_base64`, SHA-256 и metadata каждого кейса.
+- `payloads.json.gz` — неизменяемая сжатая копия manifest конкретного прогона.
 
-Для каждого завершённого кейса из временного k6 summary в `CASE_END` переносятся только компактные метрики:
-
-- число HTTP-запросов;
-- `http_req_failed`;
-- p95 и max latency;
-- `dropped_iterations`;
-- checks rate;
-- объём отправленных и полученных данных.
-
-Полные summary, stdout и stderr штатных кейсов удаляются. Поэтому число файлов не растёт пропорционально числу кейсов.
+Полные summary, stdout и stderr штатных кейсов удаляются. Компактные метрики переносятся в `CASE_END`.
 
 При ручном прерывании дополнительно создаётся:
 
@@ -172,11 +259,9 @@ results/<run-id>/interrupted/
 `run.jsonl` содержит точные временные границы:
 
 ```json
-{"event":"CASE_START","timestamp":"2026-07-28T08:15:31Z","index":42,"case_id":"case-000043-json-deep-utf-8-gzip-valid"}
-{"event":"CASE_END","timestamp":"2026-07-28T08:16:01Z","index":42,"case_id":"case-000043-json-deep-utf-8-gzip-valid"}
+{"event":"CASE_START","timestamp":"2026-07-28T08:15:31Z","index":42,"case_id":"case-000043-json-deep-base64-utf-8-gzip-valid"}
+{"event":"CASE_END","timestamp":"2026-07-28T08:16:01Z","index":42,"case_id":"case-000043-json-deep-base64-utf-8-gzip-valid"}
 ```
-
-Если событие на WAF произошло между этими отметками, активным был указанный `case_id`.
 
 Каждый HTTP-запрос также содержит:
 
@@ -184,53 +269,39 @@ results/<run-id>/interrupted/
 - `X-WAF-Test-Case-ID`;
 - `X-WAF-Test-Sequence`.
 
-Эти значения рекомендуется добавить в access/debug-логи WAF.
-
 ## Поиск и воспроизведение кейса по case_id
 
-Используйте `payloads.json.gz` из нужной run-директории, а не текущий рабочий `payloads.json`. Это гарантирует, что повторяется именно manifest данного прогона.
+Используйте `payloads.json.gz` из нужной run-директории.
 
 Посмотреть полный кейс:
 
 ```bash
 gzip -cd results/<run-id>/payloads.json.gz |
-jq '.[] | select(.id == "case-000043-json-deep-utf-8-gzip-valid")'
+jq '.[] | select(.id == "case-000043-json-deep-base64-utf-8-gzip-valid")'
 ```
 
-Сохранить кейс отдельно:
+Извлечь точное бинарное тело:
 
 ```bash
 gzip -cd results/<run-id>/payloads.json.gz |
-jq '.[] | select(.id == "case-000043-json-deep-utf-8-gzip-valid")' \
-  > request.json
-```
-
-Извлечь точное бинарное тело запроса:
-
-```bash
-gzip -cd results/<run-id>/payloads.json.gz |
-jq -r '.[] | select(.id == "case-000043-json-deep-utf-8-gzip-valid") | .body_base64' |
+jq -r '.[] | select(.id == "case-000043-json-deep-base64-utf-8-gzip-valid") | .body_base64' |
 base64 -d > request.body
 ```
 
-Найти индекс кейса:
+Найти индекс:
 
 ```bash
 gzip -cd results/<run-id>/payloads.json.gz |
 jq 'to_entries[]
-    | select(.value.id == "case-000043-json-deep-utf-8-gzip-valid")
+    | select(.value.id == "case-000043-json-deep-base64-utf-8-gzip-valid")
     | .key'
 ```
 
-Для повторного запуска сначала распакуйте архивный manifest:
+Распаковать manifest и повторить кейс:
 
 ```bash
 gzip -cd results/<run-id>/payloads.json.gz > reproduced-payloads.json
-```
 
-Затем передайте найденный индекс в k6:
-
-```bash
 PAYLOAD_INDEX=42 \
 PAYLOAD_FILE=./reproduced-payloads.json \
 TARGET_URL=https://waf.example \
@@ -239,10 +310,8 @@ DURATION=30s \
 k6 run k6_run_payloads.js
 ```
 
-Перед воспроизведением можно сверить SHA-256 тела из `run.jsonl` с полем `sha256` в архивном manifest.
-
 ## Контроль объёма корпуса
 
-Полная декартова комбинация параметров может создать большой manifest. Для первичного sweep рекомендуется ограничивать `sizes`, `charsets`, `compressions`, `depth`, `width` и `fields`.
+Полная декартова комбинация параметров может создать большой manifest. Для первичного sweep ограничивайте `sizes`, `charsets`, `compressions`, `filler-kinds`, `depth`, `width` и `fields`.
 
 Повреждённые документы и compressed streams намеренно могут получать 400, 403, 413, 415 или другие ответы. Suite не трактует их как подтверждение проблемы WAF.
