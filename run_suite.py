@@ -52,34 +52,146 @@ def archive_manifest(source: Path, destination: Path) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run streamed WAF payload cases with k6")
-    parser.add_argument("--target", required=True)
-    parser.add_argument("--payload-file", default="payloads.jsonl")
-    parser.add_argument("--k6-script", default="k6_run_payloads.js")
-    parser.add_argument("--mode", choices=["fast", "informative", "high-rps"], default="fast")
-    parser.add_argument("--batch-size", type=int)
-    parser.add_argument("--print-request", choices=["none", "headers", "full"])
-    parser.add_argument("--rps", type=int, default=10)
-    parser.add_argument("--duration", default="30s")
-    parser.add_argument("--cooldown", type=float, default=5.0)
-    parser.add_argument("--graceful-stop", default="1s")
-    parser.add_argument("--threshold-mode", choices=["disabled", "strict"], default="disabled")
-    parser.add_argument("--batch-max-duration", default="24h")
-    parser.add_argument("--preallocated-vus", type=int)
-    parser.add_argument("--max-vus", type=int)
-    parser.add_argument("--start-index", type=int, default=0)
-    parser.add_argument("--limit", type=int)
-    parser.add_argument("--case-id")
-    parser.add_argument("--format", dest="formats", action="append")
-    parser.add_argument("--structure", dest="structures", action="append")
-    parser.add_argument("--value-encoding", dest="value_encodings", action="append")
-    parser.add_argument("--charset", dest="charsets", action="append")
-    parser.add_argument("--compression", dest="compressions", action="append")
-    parser.add_argument("--validity", dest="validities", action="append",
-                        choices=["valid", "invalid", "invalid-compression"])
-    parser.add_argument("--list", action="store_true")
-    parser.add_argument("--results-dir", default="results")
-    parser.add_argument("--terminate-timeout", type=float, default=10.0)
+    examples = """examples:
+  Fast sweep:
+    python3 run_suite.py --mode fast --target https://waf.example \\
+      --payload-file payloads.jsonl --rps 1 --duration 1s --cooldown 0
+
+  Recheck a suspicious range:
+    python3 run_suite.py --mode informative --target https://waf.example \\
+      --payload-file payloads.jsonl --start-index 275 --limit 25
+
+  High-RPS verification:
+    python3 run_suite.py --mode high-rps --target https://waf.example \\
+      --payload-file payloads.jsonl --rps 500 --duration 5s \\
+      --preallocated-vus 100 --max-vus 500
+"""
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run byte-exact WAF payload cases through k6. "
+            "The runner supports a fast batched sweep, isolated informative runs, "
+            "and sequential high-RPS scenarios."
+        ),
+        epilog=examples,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    source = parser.add_argument_group("target and input")
+    source.add_argument(
+        "--target", required=True, metavar="URL",
+        help="Base target URL, for example https://waf.example. Case paths are appended to it.",
+    )
+    source.add_argument(
+        "--payload-file", default="payloads.jsonl", metavar="FILE",
+        help="JSONL manifest or legacy JSON array (default: payloads.jsonl).",
+    )
+    source.add_argument(
+        "--k6-script", default="k6_run_payloads.js", metavar="FILE",
+        help="k6 JavaScript scenario file (default: k6_run_payloads.js).",
+    )
+
+    execution = parser.add_argument_group("execution")
+    execution.add_argument(
+        "--mode", choices=["fast", "informative", "high-rps"], default="fast",
+        help=(
+            "Execution mode: fast batches sequential cases in one k6 process; "
+            "informative isolates one case per process; high-rps assigns each case "
+            "a sequential constant-arrival-rate scenario (default: fast)."
+        ),
+    )
+    execution.add_argument(
+        "--batch-size", type=int, metavar="N",
+        help="Cases per k6 process. Defaults: fast=25, informative=1, high-rps=10.",
+    )
+    execution.add_argument(
+        "--rps", type=int, default=10, metavar="N",
+        help="Target requests per second for the active case (default: 10).",
+    )
+    execution.add_argument(
+        "--duration", default="30s", metavar="TIME",
+        help="Traffic duration for each case, such as 1s, 30s or 2m (default: 30s).",
+    )
+    execution.add_argument(
+        "--cooldown", type=float, default=5.0, metavar="SECONDS",
+        help="Pause between cases inside a batch (default: 5.0). Use 0 for no pause.",
+    )
+    execution.add_argument(
+        "--graceful-stop", default="1s", metavar="TIME",
+        help="Extra time for in-flight k6 iterations to finish (default: 1s).",
+    )
+    execution.add_argument(
+        "--threshold-mode", choices=["disabled", "strict"], default="disabled",
+        help="disabled ignores WAF response status thresholds; strict enables failure and dropped-iteration thresholds (default: disabled).",
+    )
+    execution.add_argument(
+        "--batch-max-duration", default="24h", metavar="TIME",
+        help="Safety limit for one k6 batch process (default: 24h).",
+    )
+    execution.add_argument(
+        "--preallocated-vus", type=int, metavar="N",
+        help="k6 VUs allocated before arrival-rate traffic starts; mainly for high-rps.",
+    )
+    execution.add_argument(
+        "--max-vus", type=int, metavar="N",
+        help="Maximum VUs k6 may allocate; raise it when dropped_iterations appear.",
+    )
+
+    selection = parser.add_argument_group("case selection")
+    selection.add_argument(
+        "--start-index", type=int, default=0, metavar="N",
+        help="Skip manifest entries before this zero-based source index (default: 0).",
+    )
+    selection.add_argument(
+        "--limit", type=int, metavar="N",
+        help="Run at most N matching cases after all filters are applied.",
+    )
+    selection.add_argument(
+        "--case-id", metavar="ID",
+        help="Run only the exact case_id.",
+    )
+    selection.add_argument(
+        "--format", dest="formats", action="append", metavar="VALUE",
+        help="Filter metadata.format. Repeat to allow multiple values.",
+    )
+    selection.add_argument(
+        "--structure", dest="structures", action="append", metavar="VALUE",
+        help="Filter metadata.structure. Repeat to allow multiple values.",
+    )
+    selection.add_argument(
+        "--value-encoding", dest="value_encodings", action="append", metavar="VALUE",
+        help="Filter metadata.value_encoding. Repeat to allow multiple values.",
+    )
+    selection.add_argument(
+        "--charset", dest="charsets", action="append", metavar="VALUE",
+        help="Filter metadata.charset. Repeat to allow multiple values.",
+    )
+    selection.add_argument(
+        "--compression", dest="compressions", action="append", metavar="VALUE",
+        help="Filter metadata.compression. Repeat to allow multiple values.",
+    )
+    selection.add_argument(
+        "--validity", dest="validities", action="append",
+        choices=["valid", "invalid", "invalid-compression"], metavar="VALUE",
+        help="Filter metadata.validity. Repeat to allow multiple values.",
+    )
+    selection.add_argument(
+        "--list", action="store_true",
+        help="Print matching cases and exit without starting k6.",
+    )
+
+    output = parser.add_argument_group("output and shutdown")
+    output.add_argument(
+        "--print-request", choices=["none", "headers", "full"],
+        help="Request details in CASE_START: none, headers, or full Base64 body. Default: headers in informative mode, otherwise none.",
+    )
+    output.add_argument(
+        "--results-dir", default="results", metavar="DIR",
+        help="Parent directory for run artifacts (default: results).",
+    )
+    output.add_argument(
+        "--terminate-timeout", type=float, default=10.0, metavar="SECONDS",
+        help="Wait after Ctrl+C before terminating k6 more aggressively (default: 10.0).",
+    )
     return parser.parse_args()
 
 
