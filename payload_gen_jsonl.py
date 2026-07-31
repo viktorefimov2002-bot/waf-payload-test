@@ -9,26 +9,35 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 
+PROFILE_DESCRIPTIONS = {
+    "baseline": "Representative coverage of ordinary request-body parsing paths.",
+    "phase1": "Parser and allocator stress using phase1-only structures.",
+    "phase2": "Controlled decompression stress using specialized compressed streams.",
+}
+
+
 def detect_profile(argv: list[str]) -> str:
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument(
         "--stress-profile",
-        choices=["baseline", "phase1", "phase2"],
+        choices=list(PROFILE_DESCRIPTIONS),
         default="baseline",
     )
     namespace, _ = pre_parser.parse_known_args(argv)
     return namespace.stress_profile
 
 
-def load_profile(profile: str) -> tuple[Callable[[], argparse.Namespace], Callable[[argparse.Namespace], Iterable[dict[str, Any]]]]:
+def load_profile(
+    profile: str,
+) -> tuple[Callable[[], argparse.Namespace], Callable[[argparse.Namespace], Iterable[dict[str, Any]]]]:
     if profile == "phase2":
         from _decompression_profile import iter_cases, parse_args
 
         return parse_args, iter_cases
 
-    from payload_gen import iter_cases, parse_args
+    from _structural_profile import iter_cases, parse_args
 
-    return parse_args, iter_cases
+    return lambda: parse_args(profile), iter_cases
 
 
 def main() -> int:
@@ -36,8 +45,7 @@ def main() -> int:
     parse_args, iter_cases = load_profile(profile)
 
     if "--output" not in sys.argv:
-        default_output = "payloads_phase2.jsonl" if profile == "phase2" else "payloads.jsonl"
-        sys.argv.extend(["--output", default_output])
+        sys.argv.extend(["--output", f"payloads_{profile}.jsonl"])
 
     args = parse_args()
     output = Path(args.output)
@@ -49,16 +57,20 @@ def main() -> int:
     try:
         with temporary.open("w", encoding="utf-8") as handle:
             for case in iter_cases(args):
+                metadata = case.setdefault("metadata", {})
+                metadata.setdefault("stress_profile", profile)
+                if profile == "phase2":
+                    metadata.setdefault("profile_scope", "decompression-stress")
                 handle.write(json.dumps(case, ensure_ascii=False, separators=(",", ":")) + "\n")
                 total += 1
-                valid += int(case["metadata"]["validity"] == "valid")
+                valid += int(metadata.get("validity") == "valid")
         temporary.replace(output)
     except (OSError, RuntimeError, ValueError) as exc:
         temporary.unlink(missing_ok=True)
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
-    print(f"Generated {total} cases in {output} ({valid} valid, {total - valid} invalid)")
+    print(f"Generated {total} {profile} cases in {output} ({valid} valid, {total - valid} invalid)")
     return 0
 
 
