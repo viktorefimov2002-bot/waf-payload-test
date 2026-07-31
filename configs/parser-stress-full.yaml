@@ -12,7 +12,7 @@ metadata:
   tags: [parser-stress, full-coverage]
 
 safety:
-  max_cases: 50000
+  max_cases: 100000
   max_wire_body_size: 134217728
   max_decompressed_size: 134217728
 
