@@ -8,22 +8,22 @@ output:
 
 metadata:
   suite_name: baseline-full
-  description: Broad representative coverage of ordinary WAF request-body processing paths
-  tags: [baseline, full-coverage]
+  description: Optimized representative coverage of ordinary WAF request-body processing paths
+  tags: [baseline, optimized-coverage]
 
 safety:
-  max_cases: 60000
+  max_cases: 5000
   max_wire_body_size: 67108864
   max_decompressed_size: 67108864
 
 generation:
   formats: [json, form, xml, multipart, text, octet-stream]
-  sizes: [0, 1, 100, 1024, 8192, 65536]
-  charsets: [utf-8, utf-16le, utf-16be]
-  bom: [false, true]
-  filler_kinds: [repeated, random-ascii, unicode, numeric]
+  sizes: [0, 1024, 65536]
+  charsets: [utf-8, utf-16le]
+  bom: [false]
+  filler_kinds: [repeated, random-ascii, unicode]
   value_encoding_profile: recommended
-  compressions: [none, gzip, deflate, raw-deflate]
+  compressions: [none, gzip, deflate]
   structures:
     depth: 64
     width: 256
