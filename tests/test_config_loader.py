@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from _config_loader import ConfigError, load_config
+from _config_loader import ConfigError
+from _validated_config import load_config
 
 
 CONFIGS = [
@@ -23,6 +24,14 @@ def test_all_repository_configs_validate():
         loaded = load_config(Path("configs") / name)
         assert loaded.profile in {"baseline", "parser-stress", "decompression-stress"}
         assert loaded.estimated_cases > 0
+        assert loaded.estimated_cases <= loaded.safety["max_cases"]
+
+
+def test_full_structural_configs_have_expected_scale():
+    baseline = load_config("configs/baseline-full.yaml")
+    parser = load_config("configs/parser-stress-full.yaml")
+    assert 40000 <= baseline.estimated_cases <= 60000
+    assert 70000 <= parser.estimated_cases <= 100000
 
 
 def test_baseline_rejects_parser_only_option(tmp_path: Path):
