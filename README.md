@@ -4,9 +4,9 @@
 
 ## Компоненты
 
-- `payload_gen.py` — генерация структурных и parser-stress кейсов.
-- `payload_gen_jsonl.py` — потоковая запись основного manifest в JSONL.
-- `decompression_gen.py` — отдельный генератор контролируемых decompression-stress кейсов.
+- `payload_gen.py` — внутренняя реализация baseline/phase1 структурных кейсов.
+- `payload_gen_jsonl.py` — единая пользовательская точка генерации JSONL для `baseline`, `phase1` и `phase2`.
+- `_decompression_profile.py` — внутренняя реализация decompression-stress профиля phase2.
 - `run_suite.py` — единый orchestrator.
 - `k6_run_payloads.js` — сценарии k6.
 
@@ -20,10 +20,23 @@
 python3 -m pip install brotli
 ```
 
-## Генерация JSONL
+## Профиль-зависимая справка
+
+Сначала указывается профиль, после чего CLI показывает только его параметры:
+
+```bash
+python3 payload_gen_jsonl.py --stress-profile baseline --help
+python3 payload_gen_jsonl.py --stress-profile phase1 --help
+python3 payload_gen_jsonl.py --stress-profile phase2 --help
+```
+
+Параметры разных профилей нельзя смешивать. Например, `--depth` относится к baseline/phase1, а `--member-counts` — только к phase2.
+
+## Baseline
 
 ```bash
 python3 payload_gen_jsonl.py \
+  --stress-profile baseline \
   --output payloads_sweep.jsonl \
   --path /test-sweep \
   --formats json form xml multipart text octet-stream \
@@ -42,12 +55,10 @@ JSONL записывается построчно и не требует заг�
 
 ## Parser stress phase 1
 
-Расширенные структуры включаются явно:
-
 ```bash
 python3 payload_gen_jsonl.py \
-  --output payloads_phase1.jsonl \
   --stress-profile phase1 \
+  --output payloads_phase1.jsonl \
   --formats json form xml multipart \
   --sizes 1 1024 \
   --charsets utf-8 \
@@ -64,11 +75,10 @@ python3 payload_gen_jsonl.py \
 
 ## Decompression stress phase 2
 
-Декомпрессионные кейсы создаются отдельно:
-
 ```bash
-python3 decompression_gen.py \
-  --output payloads_decompression_smoke.jsonl \
+python3 payload_gen_jsonl.py \
+  --stress-profile phase2 \
+  --output payloads_phase2_smoke.jsonl \
   --formats json \
   --algorithms gzip deflate raw-deflate \
   --variants standard gzip-members sync-flush stored-blocks nested-same nested-mixed \
@@ -78,16 +88,14 @@ python3 decompression_gen.py \
   --nested-depths 2
 ```
 
-Генератор покрывает обычные потоки, concatenated gzip members, частые `Z_SYNC_FLUSH`, DEFLATE level 0 и вложенные цепочки `Content-Encoding`. По умолчанию максимальный полностью распакованный размер ограничен 256 MiB.
+Профиль покрывает обычные потоки, concatenated gzip members, частые `Z_SYNC_FLUSH`, DEFLATE level 0 и вложенные цепочки `Content-Encoding`. По умолчанию максимальный полностью распакованный размер ограничен 256 MiB.
 
 Подробности: `docs/phase2-decompression-stress.md`.
 
-## Справка
+## Справка runner
 
 ```bash
 python3 run_suite.py --help
-python3 payload_gen_jsonl.py --help
-python3 decompression_gen.py --help
 ```
 
 ## Предварительный просмотр
@@ -189,7 +197,7 @@ python3 run_suite.py \
 2. `informative` — повторить диапазон и определить конкретный `case_id`.
 3. `high-rps` или одиночный informative-прогон — проверить зависимость от интенсивности.
 
-Для decompression-stress начинать следует с `informative`, `rps=1` и ограниченного manifest.
+Для phase2 начинать следует с `informative`, `rps=1` и ограниченного manifest.
 
 ## События и корреляция
 
