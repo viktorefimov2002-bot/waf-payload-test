@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import json
 
 import payload_gen
 
@@ -46,8 +47,9 @@ def test_long_field_name_length_is_preserved():
     cases = list(payload_gen.iter_cases(args(field_name_lengths=[256])))
     case = next(item for item in cases if item["metadata"]["structure"] == "long-field-name")
     body = base64.b64decode(case["body_base64"])
+    decoded = json.loads(body)
     assert case["metadata"]["field_name_length"] == 256
-    assert len(next(iter(__import__("json").loads(body)[0:] if False else __import__("json").loads(body).keys()))) == 256
+    assert len(next(iter(decoded))) == 256
 
 
 def test_charset_mismatch_is_marked_and_byte_exact():
