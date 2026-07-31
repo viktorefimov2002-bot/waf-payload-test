@@ -1,0 +1,31 @@
+version: 1
+profile: decompression-stress
+
+output:
+  file: payloads/decompression-stress-smoke.jsonl
+  request_path: /waf-test/decompression-stress
+  overwrite: false
+
+metadata:
+  suite_name: decompression-stress-smoke
+  description: Quick Content-Encoding decoder and expansion check
+  tags: [decompression-stress, smoke]
+
+safety:
+  max_cases: 1000
+  max_wire_body_size: 67108864
+  max_decompressed_size: 8388608
+
+generation:
+  formats: [json]
+  algorithms: [gzip, deflate, raw-deflate]
+  variants: [standard, gzip-members, sync-flush, stored-blocks, nested-same, nested-mixed]
+  decompressed_sizes: [1048576, 8388608]
+  gzip_members:
+    counts: [2, 8]
+  sync_flush:
+    chunk_sizes: [64, 1024]
+  nesting:
+    depths: [2]
+  content:
+    seed_text: A
