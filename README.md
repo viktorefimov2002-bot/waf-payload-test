@@ -1,251 +1,324 @@
 # waf-payload-test
 
-Инструмент для воспроизводимого тестирования обработки HTTP request bodies в WAF. Генератор сохраняет byte-exact тело, заголовки, SHA-256, размеры, metadata и уникальный `case_id`, после чего manifest запускается через общий `run_suite.py`.
+Инструмент для воспроизводимого тестирования обработки HTTP request bodies в WAF. Проект генерирует byte-exact запросы с заголовками, SHA-256, размерами, metadata и уникальным `case_id`, после чего запускает их через общий orchestrator.
+
+## Основной интерфейс
+
+Рекомендуемый способ генерации — строгий YAML-конфиг:
+
+```bash
+python3 payload_gen_jsonl.py --config configs/baseline-full.yaml
+```
+
+Проверка без генерации:
+
+```bash
+python3 payload_gen_jsonl.py \
+  --config configs/baseline-full.yaml \
+  --validate-only
+```
+
+Предварительный просмотр выбранного профиля, output и safety limits:
+
+```bash
+python3 payload_gen_jsonl.py \
+  --config configs/parser-stress-full.yaml \
+  --dry-run
+```
+
+CLI с `--stress-profile` временно сохранён для обратной совместимости, но новые наборы рекомендуется описывать в YAML.
+
+## Установка
+
+```bash
+python3 -m pip install -r requirements.txt
+```
+
+Требования:
+
+- Python 3.10+;
+- k6 1.3.0 или совместимая версия;
+- PyYAML 6.x;
+- опционально Python-модуль `brotli` для Brotli cases.
 
 ## Профили
 
-Все наборы создаются одной точкой входа:
+Профили являются отдельными тестовыми измерениями, а не последовательными superset-наборами.
 
-```bash
-python3 payload_gen_jsonl.py --stress-profile <profile>
-```
-
-Основные профили:
-
-| Профиль | Назначение | Основные риски, которые ищем |
+| Профиль | Назначение | Основные варианты |
 |---|---|---|
-| `baseline` | Репрезентативное покрытие обычных request-body путей | Ошибки стандартного JSON/form/XML/multipart parsing, charset/BOM, value decoding, single-layer compression |
-| `parser-stress` | Нагрузка на parser, allocator и нормализацию | Рост памяти/CPU, глубокие и широкие структуры, длинные имена, множество объектов, escaping, charset faults, multipart edge cases |
-| `decompression-stress` | Нагрузка на Content-Encoding decoder | Большие expansion ratio, gzip members, частые flush, stored blocks, nested encodings, ошибки ограничения распакованного размера |
+| `baseline` | Репрезентативные обычные request bodies | базовые JSON/form/XML/multipart/text/octet-stream, charset, BOM, value encoding, однослойное compression |
+| `parser-stress` | Нагрузка на parser, allocator и normalization | deep-wide, mixed types, длинные имена, escape-heavy, charset faults, multipart boundary cases |
+| `decompression-stress` | Нагрузка на Content-Encoding decoder | expansion ratio, gzip members, sync flush, stored blocks, nested encodings |
 
-Старые имена `phase1` и `phase2` временно поддерживаются как aliases, но выводят предупреждение:
+`baseline` и `parser-stress` используют непересекающиеся списки structural cases. Специализированные compressed streams существуют только в `decompression-stress`.
+
+## Готовые конфиги
 
 ```text
-phase1 -> parser-stress
-phase2 -> decompression-stress
+configs/
+├── baseline-smoke.yaml
+├── baseline-full.yaml
+├── parser-stress-smoke.yaml
+├── parser-stress-full.yaml
+├── decompression-stress-smoke.yaml
+└── decompression-stress-full.yaml
 ```
 
-Справка зависит от профиля:
+### Smoke
+
+Используется для проверки окружения, маршрута, endpoint, k6 и журналирования WAF.
 
 ```bash
-python3 payload_gen_jsonl.py --stress-profile baseline --help
-python3 payload_gen_jsonl.py --stress-profile parser-stress --help
-python3 payload_gen_jsonl.py --stress-profile decompression-stress --help
+python3 payload_gen_jsonl.py --config configs/baseline-smoke.yaml
+python3 payload_gen_jsonl.py --config configs/parser-stress-smoke.yaml
+python3 payload_gen_jsonl.py --config configs/decompression-stress-smoke.yaml
 ```
 
-Параметры другого профиля намеренно не принимаются.
+### Full
 
-## Почему профили не дублируют друг друга
+Широкое покрытие большинства практически полезных вариантов каждого профиля.
 
-`baseline` и `parser-stress` используют непересекающиеся списки структур. `parser-stress` не является расширенным baseline: он генерирует только специализированные edge-case структуры.
-
-`decompression-stress` строит отдельные compressed streams и маркирует их:
-
-```json
-{
-  "stress_profile": "decompression-stress",
-  "test_dimension": "decompression"
-}
+```bash
+python3 payload_gen_jsonl.py --config configs/baseline-full.yaml
+python3 payload_gen_jsonl.py --config configs/parser-stress-full.yaml
+python3 payload_gen_jsonl.py --config configs/decompression-stress-full.yaml
 ```
 
-Обычный однослойный gzip в `baseline` остаётся, потому что это стандартный транспортный вариант. Специализированные members/flush/nesting существуют только в `decompression-stress`.
+Перед полной генерацией рекомендуется выполнить:
 
-# Baseline
+```bash
+python3 payload_gen_jsonl.py \
+  --config configs/parser-stress-full.yaml \
+  --validate-only
+```
 
-## Что покрывает
+## Структура YAML
 
-- JSON: `single`, `deep`, `wide`, `array`, `many-fields`, `duplicate-keys`, `truncated`, `trailing-garbage`;
+```yaml
+version: 1
+profile: baseline
+
+output:
+  file: payloads/baseline-full.jsonl
+  request_path: /waf-test/baseline
+  overwrite: false
+
+metadata:
+  suite_name: baseline-full
+  description: Broad representative coverage
+  tags: [baseline, full-coverage]
+
+safety:
+  max_cases: 30000
+  max_wire_body_size: 67108864
+  max_decompressed_size: 67108864
+
+generation:
+  # профильные параметры
+```
+
+### Общие секции
+
+- `version` — версия схемы, сейчас только `1`;
+- `profile` — `baseline`, `parser-stress` или `decompression-stress`;
+- `output.file` — путь к JSONL manifest;
+- `output.request_path` — HTTP path каждого case;
+- `output.overwrite` — разрешение перезаписи существующего manifest;
+- `metadata` — suite name, description и tags, добавляемые в каждый case;
+- `safety` — жёсткие ограничения генерации;
+- `generation` — параметры выбранного профиля.
+
+## Строгая профильная валидация
+
+Параметры другого профиля запрещены. Например, в `baseline` нельзя указать:
+
+```yaml
+member_counts: [8]
+charset_modes: [mismatch]
+field_name_lengths: [8192]
+```
+
+Генератор завершится ошибкой вместо молчаливого игнорирования:
+
+```text
+ERROR: unsupported option(s) for generation for profile "baseline": charset_modes
+```
+
+Это защищает от ситуации, когда пользователь считает, что нужный вариант был создан, хотя параметр фактически не применился.
+
+## Safety limits
+
+```yaml
+safety:
+  max_cases: 50000
+  max_wire_body_size: 134217728
+  max_decompressed_size: 134217728
+```
+
+Лимиты проверяются:
+
+1. при загрузке конфигурации;
+2. по предварительной оценке матрицы;
+3. для каждого реально сгенерированного case.
+
+При превышении генерация прерывается, временный файл удаляется, готовый manifest не заменяется.
+
+## Baseline
+
+Назначение — получить опорное поведение WAF на обычных, но разнообразных request bodies.
+
+Покрытие:
+
+- JSON: single, deep, wide, array, many fields, duplicate keys, malformed base cases;
 - form-urlencoded: single, many/repeated fields, empty pairs, invalid percent;
 - XML: single, deep, wide, attributes, truncated;
 - multipart: single, many fields, missing close, LF-only;
 - text и octet-stream;
-- UTF-8, UTF-16LE/BE, BOM;
+- UTF-8/UTF-16, BOM;
 - plain, Base64, URL и JSON Unicode escaping;
-- обычные gzip, deflate и raw-deflate.
+- обычное однослойное gzip/deflate/raw-deflate/Brotli.
 
-## Широкий coverage-набор
-
-```bash
-python3 payload_gen_jsonl.py \
-  --stress-profile baseline \
-  --output payloads_baseline_coverage.jsonl \
-  --path /waf-payload-test/baseline \
-  --formats json form xml multipart text octet-stream \
-  --sizes 0 1 100 1024 8192 65536 \
-  --charsets utf-8 utf-16le utf-16be \
-  --compressions none gzip deflate raw-deflate \
-  --filler-kinds repeated random-ascii unicode numeric \
-  --bom false true \
-  --value-encoding-profile recommended \
-  --depth 64 \
-  --width 256 \
-  --fields 512
-```
-
-Этот набор широк, поэтому перед запуском проверьте количество строк:
+Полный preset:
 
 ```bash
-wc -l payloads_baseline_coverage.jsonl
+python3 payload_gen_jsonl.py --config configs/baseline-full.yaml
 ```
 
-# Parser stress
-
-## Что покрывает
-
-- JSON `deep-wide`, mixed arrays, arrays of objects;
-- длинные и многочисленные имена полей;
-- form type conflicts;
-- escape-heavy JSON/XML/form/text;
-- charset mismatch, invalid tails и truncated code units;
-- multipart many-short-parts, empty-parts, long name/filename/boundary и boundary collision;
-- размеры вокруг типичных границ буферов и лимитов.
-
-## Широкий coverage-набор
-
-```bash
-python3 payload_gen_jsonl.py \
-  --stress-profile parser-stress \
-  --output payloads_parser_stress_coverage.jsonl \
-  --path /waf-payload-test/parser-stress \
-  --formats json form xml multipart text \
-  --sizes 1 16 17 256 257 1024 1025 8192 8193 65536 \
-  --charsets utf-8 utf-16le \
-  --charset-modes valid mismatch invalid-tail truncated-code-unit \
-  --compressions none \
-  --filler-kinds repeated random-ascii unicode escape-json escape-xml escape-form \
-  --bom false true \
-  --value-encoding-profile plain \
-  --depth 64 \
-  --width 256 \
-  --fields 1024 \
-  --field-name-lengths 16 256 1024 8192 \
-  --multipart-boundary-lengths 70 256 1024 8192
-```
-
-Для дополнительной проверки взаимодействия сложного parser input с обычным сжатием создайте отдельный небольшой набор, а не добавляйте gzip ко всей матрице:
-
-```bash
-python3 payload_gen_jsonl.py \
-  --stress-profile parser-stress \
-  --output payloads_parser_stress_gzip.jsonl \
-  --formats json xml multipart \
-  --sizes 1024 8192 \
-  --charsets utf-8 \
-  --charset-modes valid \
-  --compressions gzip deflate \
-  --filler-kinds repeated escape-json escape-xml \
-  --bom false \
-  --value-encoding-profile plain \
-  --depth 32 \
-  --width 64 \
-  --fields 256 \
-  --field-name-lengths 256 1024 \
-  --multipart-boundary-lengths 256 1024
-```
-
-# Decompression stress
-
-## Что покрывает
-
-- обычные gzip/deflate/raw-deflate/Brotli streams с контролируемым decompressed size;
-- concatenated gzip members;
-- частые `Z_SYNC_FLUSH`;
-- DEFLATE stored blocks;
-- repeated и mixed Content-Encoding chains;
-- expansion ratio и ограничения размера после распаковки.
-
-## Широкий coverage-набор
-
-```bash
-python3 payload_gen_jsonl.py \
-  --stress-profile decompression-stress \
-  --output payloads_decompression_stress_coverage.jsonl \
-  --path /waf-payload-test/decompression-stress \
-  --formats json text \
-  --algorithms gzip deflate raw-deflate br \
-  --variants standard gzip-members sync-flush stored-blocks nested-same nested-mixed \
-  --decompressed-sizes 1048576 8388608 67108864 \
-  --member-counts 2 8 32 \
-  --flush-chunk-sizes 64 1024 16384 \
-  --nested-depths 2 3 \
-  --max-decompressed-size 67108864 \
-  --seed-text A
-```
-
-Если Python-модуль `brotli` не установлен, Brotli-кейсы будут пропущены с предупреждением.
-
-# Рекомендуемый порядок запуска
-
-## 1. Проверить manifest без отправки
-
-```bash
-python3 run_suite.py \
-  --target https://example.invalid \
-  --payload-file payloads_baseline_coverage.jsonl \
-  --limit 20 \
-  --list
-```
-
-## 2. Baseline — быстрый sweep
+Первый запуск:
 
 ```bash
 python3 run_suite.py \
   --mode fast \
   --target https://example.invalid \
-  --payload-file payloads_baseline_coverage.jsonl \
+  --payload-file payloads/baseline-full.jsonl \
   --batch-size 25 \
   --rps 1 \
   --duration 1s \
   --cooldown 1
 ```
 
-## 3. Parser stress — по одному кейсу
+## Parser stress
+
+Назначение — искать проблемы рекурсивного parsing, allocation, charset conversion, normalization и multipart scanning.
+
+Покрытие:
+
+- deep-wide JSON/XML;
+- mixed arrays и conflicting form types;
+- длинные и многочисленные field/tag/attribute names;
+- escape-heavy JSON/XML/form/text;
+- charset mismatch, invalid tail и truncated code units;
+- many short/empty multipart parts;
+- длинные и near-collision boundary;
+- размеры около типичных границ allocator/parser limits.
+
+Полный preset:
+
+```bash
+python3 payload_gen_jsonl.py --config configs/parser-stress-full.yaml
+```
+
+Запускать рекомендуется по одному case:
 
 ```bash
 python3 run_suite.py \
   --mode informative \
   --target https://example.invalid \
-  --payload-file payloads_parser_stress_coverage.jsonl \
+  --payload-file payloads/parser-stress-full.jsonl \
   --rps 1 \
   --duration 3s \
   --cooldown 3
 ```
 
-## 4. Decompression stress — сначала с ограничением
+## Decompression stress
+
+Назначение — искать проблемы Content-Encoding decoder: CPU spikes, memory expansion, hangs, crashes и некорректное завершение потоков.
+
+Покрытие:
+
+- gzip, deflate, raw-deflate и Brotli;
+- standard streams;
+- concatenated gzip members;
+- frequent `Z_SYNC_FLUSH`;
+- stored DEFLATE blocks;
+- nested same/mixed Content-Encoding;
+- decoded bodies 1 MiB, 8 MiB и 64 MiB.
+
+Полный preset:
+
+```bash
+python3 payload_gen_jsonl.py --config configs/decompression-stress-full.yaml
+```
+
+Первый запуск следует ограничивать:
 
 ```bash
 python3 run_suite.py \
   --mode informative \
   --target https://example.invalid \
-  --payload-file payloads_decompression_stress_coverage.jsonl \
+  --payload-file payloads/decompression-stress-full.jsonl \
   --limit 10 \
   --rps 1 \
   --duration 3s \
   --cooldown 5
 ```
 
-После подтверждения стабильности увеличивайте `--limit`, затем RPS. Не начинайте decompression-stress с `high-rps`.
+После подтверждения стабильности постепенно увеличиваются `--limit`, decoded size и RPS.
 
-# Наблюдение за WAF
+## CLI overrides для YAML
 
-Во время тестов желательно собирать минимум:
+Разрешены только общие overrides:
 
-- RSS/PSS процессов WAF;
-- CPU по процессам и ядрам;
-- OOM, restarts, crashes и core dumps;
-- latency и HTTP status;
-- active connections и queue length;
-- request-body/decompression/parser errors;
-- время возврата памяти после завершения кейса.
+```bash
+python3 payload_gen_jsonl.py \
+  --config configs/baseline-full.yaml \
+  --output /tmp/baseline.jsonl \
+  --request-path /temporary-test
+```
 
-Сопоставление выполняется по `X-WAF-Test-Case-ID`, `case_id`, SHA-256 и событиям `CASE_START`/`CASE_END`.
+Профильные параметры меняются в YAML, а не через CLI.
 
-# Проверка проекта
+## Рекомендуемый порядок тестирования
+
+1. Сгенерировать и выполнить три smoke-набора.
+2. Выполнить `baseline-full` в режиме `fast`.
+3. Повторить подозрительные baseline cases в `informative`.
+4. Выполнить `parser-stress-full` при RPS 1 и cooldown.
+5. Выполнить `decompression-stress-full` сначала с `--limit`.
+6. Для найденных cases отдельно проверять зависимость от RPS и длительности.
+
+## Что наблюдать на WAF
+
+HTTP response сам по себе недостаточен. Следует коррелировать `case_id` с:
+
+- RSS/PSS и возвратом памяти после case;
+- CPU user/system time;
+- latency и timeout;
+- active connections и очередями;
+- parser/decompression errors;
+- рестартами процесса;
+- OOM killer;
+- core dumps;
+- ростом внутренних argument/object counters.
+
+Для корреляции используются:
+
+```text
+X-WAF-Test-Case-ID
+case_id
+SHA-256
+CASE_START
+CASE_END
+```
+
+## Проверка проекта
 
 ```bash
 python3 -m py_compile \
   payload_gen.py \
   payload_gen_jsonl.py \
+  _config_loader.py \
   _structural_profile.py \
   _parser_stress_profile.py \
   _decompression_profile.py \
@@ -256,14 +329,14 @@ python3 -m py_compile \
 python3 -m pytest -q
 ```
 
-# Основные компоненты
+## Legacy CLI
 
-- `payload_gen_jsonl.py` — единая пользовательская точка генерации;
-- `payload_gen.py` — построение структурных документов;
-- `_structural_profile.py` — внутренняя логика baseline и legacy phase1;
-- `_parser_stress_profile.py` — пользовательский профиль parser-stress;
-- `_decompression_profile.py` — внутренняя логика legacy phase2;
-- `_decompression_stress_profile.py` — пользовательский профиль decompression-stress;
-- `run_suite.py` — orchestrator;
-- `k6_run_payloads.js` — k6 scenarios;
-- `decode_payload_bodies.py` — извлечение byte-exact тела из manifest.
+Переходный интерфейс пока работает:
+
+```bash
+python3 payload_gen_jsonl.py --stress-profile baseline --help
+python3 payload_gen_jsonl.py --stress-profile parser-stress --help
+python3 payload_gen_jsonl.py --stress-profile decompression-stress --help
+```
+
+Aliases `phase1` и `phase2` считаются deprecated.
