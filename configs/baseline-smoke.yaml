@@ -1,0 +1,30 @@
+version: 1
+profile: baseline
+
+output:
+  file: payloads/baseline-smoke.jsonl
+  request_path: /waf-test/baseline
+  overwrite: false
+
+metadata:
+  suite_name: baseline-smoke
+  description: Quick representative request-body compatibility check
+  tags: [baseline, smoke]
+
+safety:
+  max_cases: 5000
+  max_wire_body_size: 16777216
+  max_decompressed_size: 16777216
+
+generation:
+  formats: [json, form, xml, multipart, text, octet-stream]
+  sizes: [0, 100, 1024]
+  charsets: [utf-8]
+  bom: [false]
+  filler_kinds: [repeated, random-ascii, unicode]
+  value_encoding_profile: recommended
+  compressions: [none, gzip]
+  structures:
+    depth: 16
+    width: 32
+    fields: 64
