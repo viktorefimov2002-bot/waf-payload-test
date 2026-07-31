@@ -82,7 +82,14 @@ def print_config_summary(config: Any) -> None:
     print(f"Safety max decompressed body: {config.safety['max_decompressed_size']} bytes")
 
 
-def generate(output: Path, profile: str, args: argparse.Namespace, iter_cases: Callable[[argparse.Namespace], Iterable[dict[str, Any]]], metadata_extra: dict[str, Any] | None = None) -> tuple[int, int]:
+def generate(
+    output: Path,
+    profile: str,
+    args: argparse.Namespace,
+    iter_cases: Callable[[argparse.Namespace], Iterable[dict[str, Any]]],
+    metadata_extra: dict[str, Any] | None = None,
+    safety: dict[str, int] | None = None,
+) -> tuple[int, int]:
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(output.suffix + ".tmp")
     total = 0
@@ -90,12 +97,21 @@ def generate(output: Path, profile: str, args: argparse.Namespace, iter_cases: C
     try:
         with temporary.open("w", encoding="utf-8") as handle:
             for case in iter_cases(args):
+                total += 1
+                if safety:
+                    if total > safety["max_cases"]:
+                        raise ValueError(f"generated case count exceeds safety.max_cases ({safety['max_cases']})")
+                    wire_size = int(case.get("wire_body_size", 0))
+                    decoded_size = int(case.get("metadata", {}).get("decompressed_size", case.get("serialized_size", 0)))
+                    if wire_size > safety["max_wire_body_size"]:
+                        raise ValueError(f"case {case.get('id')} wire body exceeds safety.max_wire_body_size")
+                    if decoded_size > safety["max_decompressed_size"]:
+                        raise ValueError(f"case {case.get('id')} decoded body exceeds safety.max_decompressed_size")
                 metadata = case.setdefault("metadata", {})
                 metadata["stress_profile"] = profile
                 if metadata_extra:
                     metadata.update(metadata_extra)
                 handle.write(json.dumps(case, ensure_ascii=False, separators=(",", ":")) + "\n")
-                total += 1
                 valid += int(metadata.get("validity") == "valid")
         temporary.replace(output)
     except Exception:
@@ -122,7 +138,7 @@ def main_config_mode() -> int:
             "suite_tags": config.metadata.get("tags", []),
             "config_file": str(config.path),
         }
-        total, valid = generate(config.output_file, config.profile, config.args, iterator, metadata)
+        total, valid = generate(config.output_file, config.profile, config.args, iterator, metadata, config.safety)
     except (ConfigError, OSError, RuntimeError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
