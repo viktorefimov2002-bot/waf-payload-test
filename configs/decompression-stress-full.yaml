@@ -1,0 +1,31 @@
+version: 1
+profile: decompression-stress
+
+output:
+  file: payloads/decompression-stress-full.jsonl
+  request_path: /waf-test/decompression-stress
+  overwrite: false
+
+metadata:
+  suite_name: decompression-stress-full
+  description: Broad Content-Encoding stream, expansion, member, flush and nesting coverage
+  tags: [decompression-stress, full-coverage]
+
+safety:
+  max_cases: 5000
+  max_wire_body_size: 268435456
+  max_decompressed_size: 67108864
+
+generation:
+  formats: [json, text]
+  algorithms: [gzip, deflate, raw-deflate, br]
+  variants: [standard, gzip-members, sync-flush, stored-blocks, nested-same, nested-mixed]
+  decompressed_sizes: [1048576, 8388608, 67108864]
+  gzip_members:
+    counts: [2, 8, 32]
+  sync_flush:
+    chunk_sizes: [64, 1024, 16384]
+  nesting:
+    depths: [2, 3]
+  content:
+    seed_text: A
