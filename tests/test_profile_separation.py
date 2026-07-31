@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import argparse
-import sys
 
-import pytest
-
-import _decompression_profile
+import _decompression_stress_profile
+import _parser_stress_profile
 import _structural_profile
 import payload_gen_jsonl
 
@@ -18,47 +16,45 @@ def option_names(parser: argparse.ArgumentParser) -> set[str]:
     }
 
 
-def test_baseline_and_phase1_structures_are_disjoint():
+def test_baseline_and_parser_stress_structures_are_disjoint():
     for fmt in ("json", "form", "xml", "multipart", "text", "octet-stream"):
         baseline = set(_structural_profile.structures_for_profile("baseline", fmt))
-        phase1 = set(_structural_profile.structures_for_profile("phase1", fmt))
-        assert baseline.isdisjoint(phase1), (fmt, baseline & phase1)
+        parser_stress = set(_structural_profile.structures_for_profile("phase1", fmt))
+        assert baseline.isdisjoint(parser_stress), (fmt, baseline & parser_stress)
 
 
-def test_baseline_and_phase1_cli_options_do_not_leak():
+def test_profile_specific_cli_options_do_not_leak():
     baseline_options = option_names(_structural_profile.build_parser("baseline"))
-    phase1_options = option_names(_structural_profile.build_parser("phase1"))
+    parser_options = option_names(_parser_stress_profile.build_parser())
+    decompression_options = option_names(_decompression_stress_profile.build_parser())
 
     assert "--field-name-lengths" not in baseline_options
     assert "--charset-modes" not in baseline_options
     assert "--member-counts" not in baseline_options
 
-    assert "--field-name-lengths" in phase1_options
-    assert "--charset-modes" in phase1_options
-    assert "--member-counts" not in phase1_options
+    assert "--field-name-lengths" in parser_options
+    assert "--charset-modes" in parser_options
+    assert "--member-counts" not in parser_options
+
+    assert "--member-counts" in decompression_options
+    assert "--decompressed-sizes" in decompression_options
+    assert "--depth" not in decompression_options
+    assert "--field-name-lengths" not in decompression_options
 
 
-def test_phase2_help_exposes_only_decompression_options(monkeypatch, capsys):
-    monkeypatch.setattr(sys, "argv", ["payload_gen_jsonl.py", "--stress-profile", "phase2", "--help"])
-    with pytest.raises(SystemExit) as exc:
-        _decompression_profile.parse_args()
-    assert exc.value.code == 0
-    help_text = capsys.readouterr().out
-
-    assert "--member-counts" in help_text
-    assert "--decompressed-sizes" in help_text
-    assert "--nested-depths" in help_text
-    assert "--depth" not in help_text
-    assert "--field-name-lengths" not in help_text
-    assert "--charset-modes" not in help_text
+def test_router_exposes_readable_profiles_and_legacy_aliases():
+    assert set(payload_gen_jsonl.PROFILE_DESCRIPTIONS) == {
+        "baseline",
+        "parser-stress",
+        "decompression-stress",
+    }
+    assert payload_gen_jsonl.canonical_profile("phase1") == "parser-stress"
+    assert payload_gen_jsonl.canonical_profile("phase2") == "decompression-stress"
 
 
-def test_router_exposes_three_distinct_profiles():
-    assert set(payload_gen_jsonl.PROFILE_DESCRIPTIONS) == {"baseline", "phase1", "phase2"}
-
-
-def test_phase2_cases_have_decompression_dimension():
+def test_decompression_cases_have_canonical_profile_name():
     args = argparse.Namespace(
+        stress_profile="phase2",
         formats=["json"],
         algorithms=["gzip"],
         variants=["standard"],
@@ -69,6 +65,6 @@ def test_phase2_cases_have_decompression_dimension():
         seed_text="A",
         path="/test",
     )
-    case = next(iter(_decompression_profile.iter_cases(args)))
+    case = next(iter(_decompression_stress_profile.iter_cases(args)))
     assert case["metadata"]["test_dimension"] == "decompression"
-    assert case["metadata"]["compression_variant"] == "standard"
+    assert case["metadata"]["stress_profile"] == "decompression-stress"
