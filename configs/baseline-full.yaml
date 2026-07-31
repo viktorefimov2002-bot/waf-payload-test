@@ -12,7 +12,7 @@ metadata:
   tags: [baseline, full-coverage]
 
 safety:
-  max_cases: 30000
+  max_cases: 60000
   max_wire_body_size: 67108864
   max_decompressed_size: 67108864
 
