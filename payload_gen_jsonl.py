@@ -76,7 +76,7 @@ def print_config_summary(config: Any) -> None:
     print(f"Profile: {config.profile}")
     print(f"Output: {config.output_file}")
     print(f"Request path: {config.request_path}")
-    print(f"Estimated cases (conservative): {config.estimated_cases}")
+    print(f"Estimated cases: {config.estimated_cases}")
     print(f"Safety max cases: {config.safety['max_cases']}")
     print(f"Safety max wire body: {config.safety['max_wire_body_size']} bytes")
     print(f"Safety max decompressed body: {config.safety['max_decompressed_size']} bytes")
@@ -121,7 +121,8 @@ def generate(
 
 
 def main_config_mode() -> int:
-    from _config_loader import ConfigError, load_config
+    from _config_loader import ConfigError
+    from _validated_config import load_config
 
     cli = config_cli(sys.argv[1:])
     try:
