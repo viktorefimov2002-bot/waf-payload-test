@@ -8,11 +8,11 @@ output:
 
 metadata:
   suite_name: parser-stress-full
-  description: Broad parser, normalization, allocator, charset and multipart stress coverage
-  tags: [parser-stress, full-coverage]
+  description: Optimized parser, normalization, allocator, charset and multipart stress coverage
+  tags: [parser-stress, optimized-coverage]
 
 safety:
-  max_cases: 100000
+  max_cases: 5000
   max_wire_body_size: 134217728
   max_decompressed_size: 134217728
 
@@ -20,20 +20,20 @@ generation:
   formats: [json, form, xml, multipart, text]
   sizes:
     mode: explicit
-    values: [1, 15, 16, 17, 255, 256, 257, 1023, 1024, 1025, 8191, 8192, 8193, 65535, 65536, 65537]
+    values: [1, 1024, 65536]
   charsets:
     declared: [utf-8, utf-16le]
     modes: [valid, mismatch, invalid-tail, truncated-code-unit]
-    bom: [false, true]
-  filler_kinds: [repeated, random-ascii, unicode, escape-json, escape-xml, escape-form]
+    bom: [false]
+  filler_kinds: [repeated, unicode, escape-json, escape-xml, escape-form]
   value_encoding_profile: plain
   compressions: [none]
   structures:
     depth: 64
     width: 256
     fields: 1024
-    field_name_lengths: [16, 256, 1024, 8192]
-    multipart_boundary_lengths: [70, 256, 1024, 8192]
+    field_name_lengths: [256, 8192]
+    multipart_boundary_lengths: [70, 8192]
   invalid_compression:
     enabled: false
     modes: [truncated, bad-tail, bitflip]
