@@ -4,8 +4,9 @@
 
 ## Компоненты
 
-- `payload_gen.py` — генерация набора кейсов.
-- `payload_gen_jsonl.py` — потоковая запись manifest в JSONL; рекомендуется для больших наборов.
+- `payload_gen.py` — генерация структурных и parser-stress кейсов.
+- `payload_gen_jsonl.py` — потоковая запись основного manifest в JSONL.
+- `decompression_gen.py` — отдельный генератор контролируемых decompression-stress кейсов.
 - `run_suite.py` — единый orchestrator.
 - `k6_run_payloads.js` — сценарии k6.
 
@@ -39,11 +40,54 @@ python3 payload_gen_jsonl.py \
 
 JSONL записывается построчно и не требует загружать весь manifest в память.
 
+## Parser stress phase 1
+
+Расширенные структуры включаются явно:
+
+```bash
+python3 payload_gen_jsonl.py \
+  --output payloads_phase1.jsonl \
+  --stress-profile phase1 \
+  --formats json form xml multipart \
+  --sizes 1 1024 \
+  --charsets utf-8 \
+  --charset-modes valid mismatch \
+  --compressions none gzip \
+  --filler-kinds repeated escape-json escape-xml escape-form \
+  --bom false \
+  --depth 8 \
+  --width 8 \
+  --fields 16
+```
+
+Подробности: `docs/phase1-parser-stress.md`.
+
+## Decompression stress phase 2
+
+Декомпрессионные кейсы создаются отдельно:
+
+```bash
+python3 decompression_gen.py \
+  --output payloads_decompression_smoke.jsonl \
+  --formats json \
+  --algorithms gzip deflate raw-deflate \
+  --variants standard gzip-members sync-flush stored-blocks nested-same nested-mixed \
+  --decompressed-sizes 1048576 8388608 \
+  --member-counts 2 8 \
+  --flush-chunk-sizes 64 1024 \
+  --nested-depths 2
+```
+
+Генератор покрывает обычные потоки, concatenated gzip members, частые `Z_SYNC_FLUSH`, DEFLATE level 0 и вложенные цепочки `Content-Encoding`. По умолчанию максимальный полностью распакованный размер ограничен 256 MiB.
+
+Подробности: `docs/phase2-decompression-stress.md`.
+
 ## Справка
 
 ```bash
 python3 run_suite.py --help
 python3 payload_gen_jsonl.py --help
+python3 decompression_gen.py --help
 ```
 
 ## Предварительный просмотр
@@ -144,6 +188,8 @@ python3 run_suite.py \
 1. `fast` — найти проблемный batch.
 2. `informative` — повторить диапазон и определить конкретный `case_id`.
 3. `high-rps` или одиночный informative-прогон — проверить зависимость от интенсивности.
+
+Для decompression-stress начинать следует с `informative`, `rps=1` и ограниченного manifest.
 
 ## События и корреляция
 
