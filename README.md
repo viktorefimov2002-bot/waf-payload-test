@@ -18,15 +18,7 @@ python3 payload_gen_jsonl.py \
   --validate-only
 ```
 
-Предварительный просмотр выбранного профиля, output и safety limits:
-
-```bash
-python3 payload_gen_jsonl.py \
-  --config configs/parser-stress-full.yaml \
-  --dry-run
-```
-
-CLI с `--stress-profile` временно сохранён для обратной совместимости, но новые наборы рекомендуется описывать в YAML.
+CLI с `--stress-profile` временно сохранён для обратной совместимости, но новые наборы следует описывать в YAML.
 
 ## Установка
 
@@ -34,12 +26,11 @@ CLI с `--stress-profile` временно сохранён для обратн�
 python3 -m pip install -r requirements.txt
 ```
 
-Требования:
+Опционально для Brotli:
 
-- Python 3.10+;
-- k6 1.3.0 или совместимая версия;
-- PyYAML 6.x;
-- опционально Python-модуль `brotli` для Brotli cases.
+```bash
+python3 -m pip install brotli
+```
 
 ## Профили
 
@@ -47,7 +38,7 @@ python3 -m pip install -r requirements.txt
 
 | Профиль | Назначение | Основные варианты |
 |---|---|---|
-| `baseline` | Репрезентативные обычные request bodies | базовые JSON/form/XML/multipart/text/octet-stream, charset, BOM, value encoding, однослойное compression |
+| `baseline` | Обычные пути обработки request body | базовые JSON/form/XML/multipart/text/octet-stream, charset, value encoding, однослойное compression |
 | `parser-stress` | Нагрузка на parser, allocator и normalization | deep-wide, mixed types, длинные имена, escape-heavy, charset faults, multipart boundary cases |
 | `decompression-stress` | Нагрузка на Content-Encoding decoder | expansion ratio, gzip members, sync flush, stored blocks, nested encodings |
 
@@ -67,7 +58,7 @@ configs/
 
 ### Smoke
 
-Используется для проверки окружения, маршрута, endpoint, k6 и журналирования WAF.
+Используется для проверки окружения, endpoint, k6 и журналирования WAF.
 
 ```bash
 python3 payload_gen_jsonl.py --config configs/baseline-smoke.yaml
@@ -75,9 +66,15 @@ python3 payload_gen_jsonl.py --config configs/parser-stress-smoke.yaml
 python3 payload_gen_jsonl.py --config configs/decompression-stress-smoke.yaml
 ```
 
-### Full
+### Optimized full
 
-Широкое покрытие большинства практически полезных вариантов каждого профиля.
+Full-конфиги используют оптимизированное покрытие вместо полного декартова произведения всех параметров.
+
+Ожидаемый масштаб:
+
+- `baseline-full`: около 3900 cases;
+- `parser-stress-full`: около 3600 cases;
+- `decompression-stress-full`: менее 200 cases.
 
 ```bash
 python3 payload_gen_jsonl.py --config configs/baseline-full.yaml
@@ -85,7 +82,7 @@ python3 payload_gen_jsonl.py --config configs/parser-stress-full.yaml
 python3 payload_gen_jsonl.py --config configs/decompression-stress-full.yaml
 ```
 
-Перед полной генерацией рекомендуется выполнить:
+Перед генерацией:
 
 ```bash
 python3 payload_gen_jsonl.py \
@@ -93,99 +90,65 @@ python3 payload_gen_jsonl.py \
   --validate-only
 ```
 
-## Структура YAML
+## Почему матрицы сокращены
 
-```yaml
-version: 1
-profile: baseline
-
-output:
-  file: payloads/baseline-full.jsonl
-  request_path: /waf-test/baseline
-  overwrite: false
-
-metadata:
-  suite_name: baseline-full
-  description: Broad representative coverage
-  tags: [baseline, full-coverage]
-
-safety:
-  max_cases: 30000
-  max_wire_body_size: 67108864
-  max_decompressed_size: 67108864
-
-generation:
-  # профильные параметры
-```
-
-### Общие секции
-
-- `version` — версия схемы, сейчас только `1`;
-- `profile` — `baseline`, `parser-stress` или `decompression-stress`;
-- `output.file` — путь к JSONL manifest;
-- `output.request_path` — HTTP path каждого case;
-- `output.overwrite` — разрешение перезаписи существующего manifest;
-- `metadata` — suite name, description и tags, добавляемые в каждый case;
-- `safety` — жёсткие ограничения генерации;
-- `generation` — параметры выбранного профиля.
-
-## Строгая профильная валидация
-
-Параметры другого профиля запрещены. Например, в `baseline` нельзя указать:
-
-```yaml
-member_counts: [8]
-charset_modes: [mismatch]
-field_name_lengths: [8192]
-```
-
-Генератор завершится ошибкой вместо молчаливого игнорирования:
+Основной источник чрезмерного количества cases — декартово произведение:
 
 ```text
-ERROR: unsupported option(s) for generation for profile "baseline": charset_modes
+structures × sizes × charsets × charset modes × BOM × fillers × encodings × compression
 ```
 
-Это защищает от ситуации, когда пользователь считает, что нужный вариант был создан, хотя параметр фактически не применился.
+Практический набор не должен проверять каждую комбинацию, если она не открывает новый путь обработки WAF.
 
-## Safety limits
+Оптимизированные presets сохраняют:
 
-```yaml
-safety:
-  max_cases: 50000
-  max_wire_body_size: 134217728
-  max_decompressed_size: 134217728
-```
+- все основные форматы;
+- все структуры соответствующего профиля;
+- типичный небольшой body;
+- крупный body;
+- пустой или минимальный body там, где это важно;
+- Unicode и обычный ASCII;
+- ключевые charset fault modes;
+- обычное сжатие и специализированные decompression variants.
 
-Лимиты проверяются:
+При этом исключены повторяющиеся комбинации, например прогон каждого filler через каждый BOM, каждый charset и каждый compression.
 
-1. при загрузке конфигурации;
-2. по предварительной оценке матрицы;
-3. для каждого реально сгенерированного case.
+## Baseline full
 
-При превышении генерация прерывается, временный файл удаляется, готовый manifest не заменяется.
-
-## Baseline
-
-Назначение — получить опорное поведение WAF на обычных, но разнообразных request bodies.
-
-Покрытие:
+Покрывает все baseline-структуры:
 
 - JSON: single, deep, wide, array, many fields, duplicate keys, malformed base cases;
 - form-urlencoded: single, many/repeated fields, empty pairs, invalid percent;
 - XML: single, deep, wide, attributes, truncated;
 - multipart: single, many fields, missing close, LF-only;
-- text и octet-stream;
-- UTF-8/UTF-16, BOM;
-- plain, Base64, URL и JSON Unicode escaping;
-- обычное однослойное gzip/deflate/raw-deflate/Brotli.
+- text и octet-stream.
 
-Полный preset:
+Оптимизированные измерения:
+
+```yaml
+generation:
+  sizes: [0, 1024, 65536]
+  charsets: [utf-8, utf-16le]
+  bom: [false]
+  filler_kinds: [repeated, random-ascii, unicode]
+  compressions: [none, gzip, deflate]
+```
+
+Почему выбраны эти размеры:
+
+- `0` — пустые и минимальные документы;
+- `1024` — обычный небольшой запрос;
+- `65536` — крупный request body и типичная граница буферов.
+
+Почему исключён `raw-deflate`: он использует тот же HTTP `Content-Encoding: deflate`, а специализированная работа с raw DEFLATE уже проверяется в `decompression-stress`.
+
+Генерация:
 
 ```bash
 python3 payload_gen_jsonl.py --config configs/baseline-full.yaml
 ```
 
-Первый запуск:
+Запуск:
 
 ```bash
 python3 run_suite.py \
@@ -198,11 +161,9 @@ python3 run_suite.py \
   --cooldown 1
 ```
 
-## Parser stress
+## Parser stress full
 
-Назначение — искать проблемы рекурсивного parsing, allocation, charset conversion, normalization и multipart scanning.
-
-Покрытие:
+Сохраняет все специальные структуры:
 
 - deep-wide JSON/XML;
 - mixed arrays и conflicting form types;
@@ -210,10 +171,36 @@ python3 run_suite.py \
 - escape-heavy JSON/XML/form/text;
 - charset mismatch, invalid tail и truncated code units;
 - many short/empty multipart parts;
-- длинные и near-collision boundary;
-- размеры около типичных границ allocator/parser limits.
+- long и collision-like multipart boundary.
 
-Полный preset:
+Оптимизированные измерения:
+
+```yaml
+generation:
+  sizes:
+    values: [1, 1024, 65536]
+  charsets:
+    declared: [utf-8, utf-16le]
+    modes: [valid, mismatch, invalid-tail, truncated-code-unit]
+    bom: [false]
+  filler_kinds: [repeated, unicode, escape-json, escape-xml, escape-form]
+  structures:
+    field_name_lengths: [256, 8192]
+    multipart_boundary_lengths: [70, 8192]
+```
+
+Здесь сохранены:
+
+- минимальный размер;
+- обычный небольшой размер;
+- крупный размер;
+- нормальная и экстремальная длина имени;
+- стандартная и экстремальная длина boundary;
+- все charset fault modes.
+
+Удалены соседние значения `15/16/17`, `255/256/257` и другие ±1-пары. Их полезно добавлять только после обнаружения конкретного порога или при тестировании известного лимита WAF.
+
+Генерация:
 
 ```bash
 python3 payload_gen_jsonl.py --config configs/parser-stress-full.yaml
@@ -231,11 +218,9 @@ python3 run_suite.py \
   --cooldown 3
 ```
 
-## Decompression stress
+## Decompression stress full
 
-Назначение — искать проблемы Content-Encoding decoder: CPU spikes, memory expansion, hangs, crashes и некорректное завершение потоков.
-
-Покрытие:
+Покрывает:
 
 - gzip, deflate, raw-deflate и Brotli;
 - standard streams;
@@ -245,13 +230,13 @@ python3 run_suite.py \
 - nested same/mixed Content-Encoding;
 - decoded bodies 1 MiB, 8 MiB и 64 MiB.
 
-Полный preset:
+Этот набор уже небольшой по количеству cases, поэтому его матрица существенно не сокращалась. Каждый case здесь значительно тяжелее structural cases.
 
 ```bash
 python3 payload_gen_jsonl.py --config configs/decompression-stress-full.yaml
 ```
 
-Первый запуск следует ограничивать:
+Первый запуск:
 
 ```bash
 python3 run_suite.py \
@@ -264,29 +249,53 @@ python3 run_suite.py \
   --cooldown 5
 ```
 
-После подтверждения стабильности постепенно увеличиваются `--limit`, decoded size и RPS.
+## Когда использовать дополнительные граничные значения
 
-## CLI overrides для YAML
+Полные ±1-наборы следует использовать не в первом широком sweep, а на втором диагностическом этапе.
 
-Разрешены только общие overrides:
+Например, если проблема проявилась около 64 KiB, создаётся копия config с:
 
-```bash
-python3 payload_gen_jsonl.py \
-  --config configs/baseline-full.yaml \
-  --output /tmp/baseline.jsonl \
-  --request-path /temporary-test
+```yaml
+sizes:
+  values: [65535, 65536, 65537]
 ```
 
-Профильные параметры меняются в YAML, а не через CLI.
+То же относится к:
+
+- длине field name;
+- multipart boundary;
+- depth;
+- width;
+- fields;
+- decompressed size.
+
+Это позволяет сначала найти проблемное измерение, а затем точно локализовать порог без десятков тысяч лишних запросов.
+
+## Строгая профильная валидация
+
+Параметры другого профиля запрещены. Например, в `baseline` нельзя указать decompression или parser-only поля.
+
+Неизвестная опция приводит к ошибке вместо молчаливого игнорирования.
+
+## Safety limits
+
+Лимиты проверяются:
+
+1. при загрузке конфигурации;
+2. по предварительной оценке матрицы;
+3. для каждого реально сгенерированного case.
+
+При превышении генерация прерывается, временный файл удаляется, готовый manifest не заменяется.
 
 ## Рекомендуемый порядок тестирования
 
-1. Сгенерировать и выполнить три smoke-набора.
+1. Выполнить три smoke-набора.
 2. Выполнить `baseline-full` в режиме `fast`.
 3. Повторить подозрительные baseline cases в `informative`.
 4. Выполнить `parser-stress-full` при RPS 1 и cooldown.
 5. Выполнить `decompression-stress-full` сначала с `--limit`.
-6. Для найденных cases отдельно проверять зависимость от RPS и длительности.
+6. Для найденного измерения создать узкий boundary config с ±1 значениями.
+7. Для найденных cases отдельно проверить зависимость от RPS и длительности.
 
 ## Что наблюдать на WAF
 
@@ -319,6 +328,7 @@ python3 -m py_compile \
   payload_gen.py \
   payload_gen_jsonl.py \
   _config_loader.py \
+  _validated_config.py \
   _structural_profile.py \
   _parser_stress_profile.py \
   _decompression_profile.py \
