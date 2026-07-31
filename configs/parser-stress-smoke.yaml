@@ -1,0 +1,39 @@
+version: 1
+profile: parser-stress
+
+output:
+  file: payloads/parser-stress-smoke.jsonl
+  request_path: /waf-test/parser-stress
+  overwrite: false
+
+metadata:
+  suite_name: parser-stress-smoke
+  description: Quick parser, allocator, charset and multipart edge-case check
+  tags: [parser-stress, smoke]
+
+safety:
+  max_cases: 5000
+  max_wire_body_size: 16777216
+  max_decompressed_size: 16777216
+
+generation:
+  formats: [json, form, xml, multipart, text]
+  sizes:
+    mode: explicit
+    values: [1, 16, 17, 1024]
+  charsets:
+    declared: [utf-8]
+    modes: [valid, mismatch]
+    bom: [false]
+  filler_kinds: [repeated, escape-json, escape-xml, escape-form]
+  value_encoding_profile: plain
+  compressions: [none]
+  structures:
+    depth: 16
+    width: 32
+    fields: 64
+    field_name_lengths: [16, 256]
+    multipart_boundary_lengths: [70, 256]
+  invalid_compression:
+    enabled: false
+    modes: [truncated, bad-tail, bitflip]
