@@ -41,23 +41,23 @@ def rewrite_profile_argument(requested: str, canonical: str) -> None:
 
 def load_profile(profile: str) -> tuple[Callable[[], argparse.Namespace], Callable[[argparse.Namespace], Iterable[dict[str, Any]]]]:
     if profile == "decompression-stress":
-        from _decompression_stress_profile import iter_cases, parse_args
+        from modules.decompression_stress_profile import iter_cases, parse_args
         return parse_args, iter_cases
     if profile == "parser-stress":
-        from _parser_stress_profile import iter_cases, parse_args
+        from modules.parser_stress_profile import iter_cases, parse_args
         return parse_args, iter_cases
-    from _structural_profile import iter_cases, parse_args
+    from modules.structural_profile import iter_cases, parse_args
     return lambda: parse_args("baseline"), iter_cases
 
 
 def iterator_for_config(profile: str) -> Callable[[argparse.Namespace], Iterable[dict[str, Any]]]:
     if profile == "decompression-stress":
-        from _decompression_stress_profile import iter_cases
+        from modules.decompression_stress_profile import iter_cases
         return iter_cases
     if profile == "parser-stress":
-        from _parser_stress_profile import iter_cases
+        from modules.parser_stress_profile import iter_cases
         return iter_cases
-    from _structural_profile import iter_cases
+    from modules.structural_profile import iter_cases
     return iter_cases
 
 
@@ -121,8 +121,8 @@ def generate(
 
 
 def main_config_mode() -> int:
-    from _config_loader import ConfigError
-    from _validated_config import load_config
+    from modules.config_loader import ConfigError
+    from modules.validated_config import load_config
 
     cli = config_cli(sys.argv[1:])
     try:
@@ -152,7 +152,7 @@ def main_legacy_mode() -> int:
     rewrite_profile_argument(requested, profile)
     parse_args, iter_cases = load_profile(profile)
     if "--output" not in sys.argv:
-        sys.argv.extend(["--output", f"payloads_{profile.replace('-', '_')}.jsonl"])
+        sys.argv.extend(["--output", f"payloads/{profile}.jsonl"])
     try:
         args = parse_args()
         output = Path(args.output)
