@@ -1,0 +1,30 @@
+version: 1
+name: high-rps-recheck
+
+target:
+  url: https://waf.example.invalid
+
+input:
+  payload_file: payloads/baseline-full.jsonl
+  k6_script: k6_run_payloads.js
+
+execution:
+  mode: high-rps
+  batch_size: 5
+  rps: 100
+  duration: 5s
+  cooldown: 5
+  graceful_stop: 2s
+  threshold_mode: strict
+  batch_max_duration: 1h
+  preallocated_vus: 50
+  max_vus: 200
+
+selection:
+  start_index: 0
+  limit: 5
+
+output:
+  results_dir: results
+  print_request: headers
+  terminate_timeout: 15
