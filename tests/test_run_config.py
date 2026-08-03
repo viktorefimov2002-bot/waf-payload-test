@@ -22,6 +22,17 @@ def test_repository_run_configs_validate():
         assert args.results_dir == "results"
 
 
+def test_any_manifest_can_be_used_with_any_mode(tmp_path: Path):
+    arbitrary_manifest = tmp_path / "custom-cases.jsonl"
+    for name in RUN_CONFIGS:
+        args = load_run_config(
+            Path("run-configs") / name,
+            payload_override=str(arbitrary_manifest),
+        )
+        assert args.payload_file == str(arbitrary_manifest)
+        assert args.mode in {"fast", "informative", "high-rps"}
+
+
 def test_fast_mode_rejects_high_rps_only_options(tmp_path: Path):
     config = yaml.safe_load(Path("run-configs/baseline-fast.yaml").read_text(encoding="utf-8"))
     config["execution"]["preallocated_vus"] = 10
