@@ -5,7 +5,7 @@ import base64
 import hashlib
 import json
 
-import _structural_profile
+from modules import structural_profile
 import payload_gen
 
 
@@ -36,13 +36,13 @@ def args(**overrides):
 
 
 def test_phase1_contains_only_phase1_json_structures():
-    structures = {case["metadata"]["structure"] for case in _structural_profile.iter_cases(args())}
+    structures = {case["metadata"]["structure"] for case in structural_profile.iter_cases(args())}
     assert structures == set(payload_gen.PHASE1_STRUCTURES["json"])
     assert structures.isdisjoint(payload_gen.BASE_STRUCTURES["json"])
 
 
 def test_long_field_name_length_is_preserved():
-    cases = list(_structural_profile.iter_cases(args(field_name_lengths=[256])))
+    cases = list(structural_profile.iter_cases(args(field_name_lengths=[256])))
     case = next(item for item in cases if item["metadata"]["structure"] == "long-field-name")
     body = base64.b64decode(case["body_base64"])
     decoded = json.loads(body)
@@ -51,7 +51,7 @@ def test_long_field_name_length_is_preserved():
 
 
 def test_charset_mismatch_is_marked_and_byte_exact():
-    cases = list(_structural_profile.iter_cases(args(charset_modes=["mismatch"])))
+    cases = list(structural_profile.iter_cases(args(charset_modes=["mismatch"])))
     case = cases[0]
     body = base64.b64decode(case["body_base64"])
     assert case["metadata"]["validity"] == "invalid-charset"
