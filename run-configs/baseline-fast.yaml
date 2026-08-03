@@ -1,0 +1,27 @@
+version: 1
+name: baseline-fast
+
+target:
+  url: https://waf.example.invalid
+
+input:
+  payload_file: payloads/baseline-full.jsonl
+  k6_script: k6_run_payloads.js
+
+execution:
+  mode: fast
+  batch_size: 25
+  rps: 1
+  duration: 1s
+  cooldown: 1
+  graceful_stop: 1s
+  threshold_mode: disabled
+  batch_max_duration: 24h
+
+selection:
+  start_index: 0
+
+output:
+  results_dir: results
+  print_request: none
+  terminate_timeout: 10
