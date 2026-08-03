@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from _config_loader import ConfigError
-from _validated_config import load_config
+from modules.config_loader import ConfigError
+from modules.validated_config import load_config
 
 
 CONFIGS = [
