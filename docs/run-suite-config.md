@@ -22,6 +22,34 @@ python3 run_suite.py \
   --target https://real-waf.example
 ```
 
+## Любой manifest в любом режиме
+
+Режим запуска не привязан к профилю генерации payload. Любой корректный JSONL manifest можно запускать в `fast`, `informative` или `high-rps`.
+
+Например, произвольный manifest в high-RPS режиме:
+
+```bash
+python3 run_suite.py \
+  --config run-configs/high-rps-recheck.yaml \
+  --payload-file payloads/custom-cases.jsonl \
+  --target https://real-waf.example
+```
+
+Или напрямую через CLI:
+
+```bash
+python3 run_suite.py \
+  --mode high-rps \
+  --payload-file payloads/custom-cases.jsonl \
+  --target https://real-waf.example \
+  --rps 100 \
+  --duration 5s \
+  --preallocated-vus 50 \
+  --max-vus 200
+```
+
+Runner не проверяет имя файла или `stress_profile`. Он требует, чтобы каждая запись manifest содержала необходимые поля запроса, используемые `k6_run_payloads.js`, например `id`, `method`, `path`, `headers` и `body_base64`.
+
 ## Готовые presets
 
 ```text
@@ -35,7 +63,7 @@ run-configs/
 - `baseline-fast` — последовательный широкий sweep небольшими batch;
 - `parser-informative` — один parser case на процесс с request headers в журнале;
 - `decompression-informative` — первые 10 тяжёлых decompression cases с cooldown;
-- `high-rps-recheck` — ограниченный повтор выбранных cases под повышенной нагрузкой.
+- `high-rps-recheck` — безопасный шаблон повышенной нагрузки. Его `input.payload_file` можно заменить на любой JSONL.
 
 Во всех presets замените `target.url` или используйте CLI override `--target`.
 
@@ -89,7 +117,7 @@ max_vus:
 mode: high-rps
 ```
 
-Также проверяется, что `preallocated_vus <= max_vus`.
+Это ограничение относится к параметрам нагрузки, а не к payload manifest. Также проверяется, что `preallocated_vus <= max_vus`.
 
 ## Selection filters
 
