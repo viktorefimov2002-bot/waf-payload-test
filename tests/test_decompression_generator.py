@@ -6,7 +6,7 @@ import gzip
 import hashlib
 import zlib
 
-import _decompression_profile as decompression_profile
+from modules import decompression_profile
 
 
 def args(**overrides):
