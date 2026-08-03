@@ -1,4 +1,9 @@
 payloads.json
+payloads/*.jsonl
+payloads/*.jsonl.gz
+payloads/*.tmp
+!payloads/.gitkeep
 results/
 __pycache__/
 *.pyc
+.pytest_cache/
