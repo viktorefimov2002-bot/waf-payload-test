@@ -25,6 +25,7 @@ def test_all_repository_configs_validate():
         assert loaded.profile in {"baseline", "parser-stress", "decompression-stress"}
         assert loaded.estimated_cases > 0
         assert loaded.estimated_cases <= loaded.safety["max_cases"]
+        assert loaded.output_file.parent == Path("payloads")
 
 
 def test_optimized_full_structural_configs_have_practical_scale():
