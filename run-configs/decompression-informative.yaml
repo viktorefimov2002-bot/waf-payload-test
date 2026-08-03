@@ -1,0 +1,28 @@
+version: 1
+name: decompression-informative
+
+target:
+  url: https://waf.example.invalid
+
+input:
+  payload_file: payloads/decompression-stress-full.jsonl
+  k6_script: k6_run_payloads.js
+
+execution:
+  mode: informative
+  batch_size: 1
+  rps: 1
+  duration: 3s
+  cooldown: 5
+  graceful_stop: 2s
+  threshold_mode: disabled
+  batch_max_duration: 24h
+
+selection:
+  start_index: 0
+  limit: 10
+
+output:
+  results_dir: results
+  print_request: headers
+  terminate_timeout: 15
