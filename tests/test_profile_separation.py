@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import argparse
 
-import _decompression_stress_profile
-import _parser_stress_profile
-import _structural_profile
+from modules import decompression_stress_profile
+from modules import parser_stress_profile
+from modules import structural_profile
 import payload_gen_jsonl
 
 
@@ -18,15 +18,15 @@ def option_names(parser: argparse.ArgumentParser) -> set[str]:
 
 def test_baseline_and_parser_stress_structures_are_disjoint():
     for fmt in ("json", "form", "xml", "multipart", "text", "octet-stream"):
-        baseline = set(_structural_profile.structures_for_profile("baseline", fmt))
-        parser_stress = set(_structural_profile.structures_for_profile("phase1", fmt))
+        baseline = set(structural_profile.structures_for_profile("baseline", fmt))
+        parser_stress = set(structural_profile.structures_for_profile("phase1", fmt))
         assert baseline.isdisjoint(parser_stress), (fmt, baseline & parser_stress)
 
 
 def test_profile_specific_cli_options_do_not_leak():
-    baseline_options = option_names(_structural_profile.build_parser("baseline"))
-    parser_options = option_names(_parser_stress_profile.build_parser())
-    decompression_options = option_names(_decompression_stress_profile.build_parser())
+    baseline_options = option_names(structural_profile.build_parser("baseline"))
+    parser_options = option_names(parser_stress_profile.build_parser())
+    decompression_options = option_names(decompression_stress_profile.build_parser())
 
     assert "--field-name-lengths" not in baseline_options
     assert "--charset-modes" not in baseline_options
@@ -65,6 +65,6 @@ def test_decompression_cases_have_canonical_profile_name():
         seed_text="A",
         path="/test",
     )
-    case = next(iter(_decompression_stress_profile.iter_cases(args)))
+    case = next(iter(decompression_stress_profile.iter_cases(args)))
     assert case["metadata"]["test_dimension"] == "decompression"
     assert case["metadata"]["stress_profile"] == "decompression-stress"
