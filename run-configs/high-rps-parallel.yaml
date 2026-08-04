@@ -1,0 +1,36 @@
+version: 1
+name: high-rps-parallel
+
+target:
+  url: https://waf.example.invalid
+
+input:
+  payload_file: payloads/baseline-full.jsonl
+  k6_script: k6_run_payloads.js
+
+execution:
+  mode: high-rps
+  # Keep enough cases in one k6 process to amortize startup overhead.
+  batch_size: 40
+  # RPS is applied to every active case, not divided between lanes.
+  rps: 30
+  duration: 5s
+  cooldown: 1
+  lanes: 4
+  # Safety guard: lanes * rps must not exceed this value.
+  max_total_rps: 120
+  # These limits are per active case scenario.
+  preallocated_vus: 20
+  max_vus: 80
+  graceful_stop: 2s
+  threshold_mode: disabled
+  batch_max_duration: 24h
+
+selection:
+  start_index: 0
+
+output:
+  results_dir: results
+  print_request: none
+  terminate_timeout: 15
+  lane_journals: true
