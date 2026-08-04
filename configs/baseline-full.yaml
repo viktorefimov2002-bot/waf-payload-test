@@ -20,7 +20,7 @@ generation:
   formats: [json, form, xml, multipart, text, octet-stream]
   # Size is the value/filler length before it is repeated by wide/array/repeated-field structures.
   # Large single-value bodies are covered separately by baseline-large-body.yaml.
-  sizes: [0, 1024, 8192]
+  sizes: [0, 256, 1024]
   charsets: [utf-8, utf-16le]
   bom: [false]
   filler_kinds: [repeated, random-ascii, unicode]
