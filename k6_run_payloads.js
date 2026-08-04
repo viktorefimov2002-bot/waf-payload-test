@@ -13,6 +13,7 @@ const duration = __ENV.DURATION || '30s';
 const cooldown = Number.parseFloat(__ENV.COOLDOWN || '0');
 const gracefulStop = __ENV.GRACEFUL_STOP || '1s';
 const thresholdMode = __ENV.THRESHOLD_MODE || 'disabled';
+const lanes = Math.max(1, Number.parseInt(__ENV.PARALLEL_LANES || '1', 10));
 const preAllocatedVUs = Number.parseInt(__ENV.PREALLOCATED_VUS || String(Math.max(10, Math.ceil(rate / 5))), 10);
 const maxVUs = Number.parseInt(__ENV.MAX_VUS || String(Math.max(preAllocatedVUs, rate * 2)), 10);
 const batchMode = cases.length > 1;
@@ -24,6 +25,10 @@ if (!cases.length || cases.some((item) => !item || typeof item !== 'object' || !
 
 function caseIndex(currentCase, offset = 0) {
     return Number.isInteger(currentCase._source_index) ? currentCase._source_index : fallbackIndex + offset;
+}
+
+function laneForOffset(offset) {
+    return offset % lanes;
 }
 
 function durationSeconds(value) {
@@ -47,31 +52,39 @@ function buildHighRpsScenarios() {
     for (let offset = 0; offset < cases.length; offset += 1) {
         const currentCase = cases[offset];
         const index = caseIndex(currentCase, offset);
+        const lane = laneForOffset(offset);
+        const slot = Math.floor(offset / lanes);
         scenarios[`payload_${offset}`] = {
             executor: 'constant-arrival-rate',
             exec: 'runHighRpsCase',
             rate,
             timeUnit: '1s',
             duration,
-            startTime: secondsDuration(offset * slotSeconds),
+            startTime: secondsDuration(slot * slotSeconds),
             gracefulStop,
             preAllocatedVUs,
             maxVUs,
-            env: { CASE_OFFSET: String(offset) },
+            env: { CASE_OFFSET: String(offset), CASE_LANE: String(lane) },
             tags: {
                 payload_id: currentCase.id,
                 payload_index: String(index),
+                payload_lane: String(lane),
             },
         };
     }
-    scenarios.batch_controller = {
-        executor: 'shared-iterations',
-        exec: 'highRpsController',
-        vus: 1,
-        iterations: 1,
-        maxDuration: __ENV.BATCH_MAX_DURATION || '24h',
-        gracefulStop: '0s',
-    };
+    const activeLanes = Math.min(lanes, cases.length);
+    for (let lane = 0; lane < activeLanes; lane += 1) {
+        scenarios[`lane_controller_${lane}`] = {
+            executor: 'shared-iterations',
+            exec: 'highRpsLaneController',
+            vus: 1,
+            iterations: 1,
+            maxDuration: __ENV.BATCH_MAX_DURATION || '24h',
+            gracefulStop: '0s',
+            env: { CASE_LANE: String(lane) },
+            tags: { payload_lane: String(lane), controller: 'true' },
+        };
+    }
     return scenarios;
 }
 
@@ -108,6 +121,7 @@ export const options = {
     tags: {
         test_run_id: __ENV.RUN_ID || 'manual',
         run_mode: runMode,
+        parallel_lanes: String(lanes),
     },
 };
 
@@ -123,18 +137,20 @@ function event(name, currentCase, index, extra = {}) {
     }));
 }
 
-function sendCase(currentCase, index) {
+function sendCase(currentCase, index, lane = 0) {
     const body = encoding.b64decode(currentCase.body_base64, 'std');
     const headers = {
         ...currentCase.headers,
         'X-WAF-Test-Run-ID': __ENV.RUN_ID || 'manual',
         'X-WAF-Test-Sequence': String(index),
+        'X-WAF-Test-Lane': String(lane),
     };
     const response = http.request(currentCase.method || 'POST', `${targetBase}${currentCase.path || ''}`, body, {
         headers,
         tags: {
             payload_id: currentCase.id,
             payload_index: String(index),
+            payload_lane: String(lane),
             payload_sha256: currentCase.sha256,
             content_type: headers['Content-Type'] || 'none',
             content_encoding: headers['Content-Encoding'] || 'none',
@@ -151,20 +167,22 @@ export function setup() {
         event: 'K6_RUN_START',
         cases: cases.length,
         mode: runMode,
-        rps: rate,
+        lanes,
+        rps_per_case: rate,
+        max_active_rps: rate * Math.min(lanes, cases.length),
         duration,
         cooldown,
         graceful_stop: gracefulStop,
         threshold_mode: thresholdMode,
-        preallocated_vus: preAllocatedVUs,
-        max_vus: maxVUs,
+        preallocated_vus_per_case: preAllocatedVUs,
+        max_vus_per_case: maxVUs,
     }));
-    if (!batchMode && !highRpsMode) event('CASE_START', cases[0], caseIndex(cases[0]));
+    if (!batchMode && !highRpsMode) event('CASE_START', cases[0], caseIndex(cases[0]), { lane: 0 });
 }
 
 export default function () {
     if (!batchMode) {
-        sendCase(cases[0], caseIndex(cases[0]));
+        sendCase(cases[0], caseIndex(cases[0]), 0);
         return;
     }
 
@@ -175,39 +193,46 @@ export default function () {
         const index = caseIndex(currentCase, offset);
         const started = Date.now();
         let requests = 0;
-        event('CASE_START', currentCase, index, { mode: 'fast' });
+        event('CASE_START', currentCase, index, { mode: 'fast', lane: 0 });
         while ((Date.now() - started) / 1000 < seconds) {
             const iterationStarted = Date.now();
-            sendCase(currentCase, index);
+            sendCase(currentCase, index, 0);
             requests += 1;
             const remaining = interval - ((Date.now() - iterationStarted) / 1000);
             if (remaining > 0) sleep(remaining);
         }
-        event('CASE_END', currentCase, index, { mode: 'fast', requests, elapsed_seconds: (Date.now() - started) / 1000 });
+        event('CASE_END', currentCase, index, { mode: 'fast', lane: 0, requests, elapsed_seconds: (Date.now() - started) / 1000 });
         if (cooldown > 0 && offset + 1 < cases.length) sleep(cooldown);
     }
 }
 
 export function runHighRpsCase() {
     const offset = Number.parseInt(__ENV.CASE_OFFSET || '-1', 10);
+    const lane = Number.parseInt(__ENV.CASE_LANE || '0', 10);
     const currentCase = cases[offset];
     if (!currentCase) throw new Error(`No payload for CASE_OFFSET=${offset}`);
-    sendCase(currentCase, caseIndex(currentCase, offset));
+    sendCase(currentCase, caseIndex(currentCase, offset), lane);
 }
 
-export function highRpsController() {
+export function highRpsLaneController() {
+    const lane = Number.parseInt(__ENV.CASE_LANE || '0', 10);
     const seconds = durationSeconds(duration);
-    for (let offset = 0; offset < cases.length; offset += 1) {
+    for (let offset = lane; offset < cases.length; offset += lanes) {
         const currentCase = cases[offset];
         const index = caseIndex(currentCase, offset);
-        event('CASE_START', currentCase, index, { mode: 'high-rps', target_rps: rate, scheduled_duration: duration });
+        event('CASE_START', currentCase, index, {
+            mode: 'high-rps', lane, target_rps: rate, scheduled_duration: duration,
+        });
         sleep(seconds);
-        event('CASE_END', currentCase, index, { mode: 'high-rps', target_rps: rate, scheduled_duration: duration });
-        if (cooldown > 0 && offset + 1 < cases.length) sleep(cooldown);
+        event('CASE_END', currentCase, index, {
+            mode: 'high-rps', lane, target_rps: rate, scheduled_duration: duration,
+            expected_requests: Math.round(rate * seconds),
+        });
+        if (cooldown > 0 && offset + lanes < cases.length) sleep(cooldown);
     }
 }
 
 export function teardown() {
-    if (!batchMode && !highRpsMode) event('CASE_END', cases[0], caseIndex(cases[0]));
-    console.log(JSON.stringify({ event: 'K6_RUN_END', cases: cases.length, mode: runMode }));
+    if (!batchMode && !highRpsMode) event('CASE_END', cases[0], caseIndex(cases[0]), { lane: 0 });
+    console.log(JSON.stringify({ event: 'K6_RUN_END', cases: cases.length, mode: runMode, lanes }));
 }
