@@ -16,6 +16,7 @@ CONFIGS = [
     "parser-stress-smoke.yaml",
     "parser-stress-full.yaml",
     "parser-stress-large-body.yaml",
+    "parser-stress-deep-wide.yaml",
     "decompression-stress-smoke.yaml",
     "decompression-stress-full.yaml",
 ]
@@ -40,8 +41,17 @@ def test_optimized_full_structural_configs_have_practical_scale():
 def test_full_configs_bound_repeated_value_sizes():
     baseline = load_config("configs/baseline-full.yaml")
     parser = load_config("configs/parser-stress-full.yaml")
-    assert max(baseline.args.sizes) <= 8192
-    assert max(parser.args.sizes) <= 1024
+    assert baseline.args.sizes == [0, 256, 1024]
+    assert parser.args.sizes == [1, 256, 1024]
+
+
+def test_parser_full_bounds_structural_fanout():
+    parser = load_config("configs/parser-stress-full.yaml")
+    assert parser.args.depth == 32
+    assert parser.args.width == 64
+    assert parser.args.fields == 1024
+    assert parser.args.field_name_lengths == [64, 256]
+    assert parser.args.multipart_boundary_lengths == [70, 256]
 
 
 def test_large_body_configs_keep_focused_64k_coverage():
