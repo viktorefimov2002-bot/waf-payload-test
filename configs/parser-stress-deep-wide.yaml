@@ -1,0 +1,39 @@
+version: 1
+profile: parser-stress
+
+output:
+  file: payloads/parser-stress-deep-wide.jsonl
+  request_path: /waf-test/parser-stress/deep-wide
+  overwrite: false
+
+metadata:
+  suite_name: parser-stress-deep-wide
+  description: Focused extreme depth-width parser coverage with bounded per-node values
+  tags: [parser-stress, deep-wide, focused]
+
+safety:
+  max_cases: 1000
+  max_wire_body_size: 134217728
+  max_decompressed_size: 134217728
+
+generation:
+  formats: [json, xml]
+  sizes:
+    mode: explicit
+    values: [1, 16, 64]
+  charsets:
+    declared: [utf-8, utf-16le]
+    modes: [valid, mismatch, invalid-tail, truncated-code-unit]
+    bom: [false]
+  filler_kinds: [repeated, unicode, escape-json, escape-xml]
+  value_encoding_profile: plain
+  compressions: [none]
+  structures:
+    depth: 64
+    width: 256
+    fields: 1
+    field_name_lengths: [64]
+    multipart_boundary_lengths: [70]
+  invalid_compression:
+    enabled: false
+    modes: [truncated, bad-tail, bitflip]
