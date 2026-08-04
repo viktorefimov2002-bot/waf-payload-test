@@ -27,6 +27,7 @@ DECOMP_KEYS = {
     "formats", "algorithms", "variants", "decompressed_sizes", "gzip_members",
     "sync_flush", "nesting", "content",
 }
+CONTENT_PROFILES = {"highly-compressible", "medium-compressible", "incompressible"}
 
 
 class ConfigError(ValueError):
@@ -159,7 +160,14 @@ def _decompression_namespace(generation: dict[str, Any], request_path: str, outp
     _forbid_extra(members, {"counts"}, "generation.gzip_members")
     _forbid_extra(flush, {"chunk_sizes"}, "generation.sync_flush")
     _forbid_extra(nesting, {"depths"}, "generation.nesting")
-    _forbid_extra(content, {"seed_text"}, "generation.content")
+    _forbid_extra(content, {"profile", "seed_text", "random_seed"}, "generation.content")
+    content_profile = str(content.get("profile", "highly-compressible"))
+    if content_profile not in CONTENT_PROFILES:
+        raise ConfigError(f"generation.content.profile must be one of: {', '.join(sorted(CONTENT_PROFILES))}")
+    seed_text = str(content.get("seed_text", "A"))
+    if not seed_text:
+        raise ConfigError("generation.content.seed_text must not be empty")
+    random_seed = _positive_int(content.get("random_seed", 42), "generation.content.random_seed")
     args = argparse.Namespace(
         stress_profile="decompression-stress", output=str(output_file), path=request_path,
         formats=_list(generation.get("formats"), "generation.formats"),
@@ -169,7 +177,9 @@ def _decompression_namespace(generation: dict[str, Any], request_path: str, outp
         member_counts=_non_negative_ints(members.get("counts"), "generation.gzip_members.counts"),
         flush_chunk_sizes=_non_negative_ints(flush.get("chunk_sizes"), "generation.sync_flush.chunk_sizes"),
         nested_depths=_non_negative_ints(nesting.get("depths"), "generation.nesting.depths"),
-        seed_text=str(content.get("seed_text", "A")),
+        content_profile=content_profile,
+        seed_text=seed_text,
+        random_seed=random_seed,
     )
     estimate = len(args.formats) * len(args.decompressed_sizes) * max(1, len(args.algorithms)) * max(1, len(args.variants))
     return args, estimate
