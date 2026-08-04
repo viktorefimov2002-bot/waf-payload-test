@@ -1,0 +1,33 @@
+version: 1
+profile: decompression-stress
+
+output:
+  file: payloads/decompression-stress-incompressible.jsonl
+  request_path: /waf-test/decompression-stress/incompressible
+  overwrite: false
+
+metadata:
+  suite_name: decompression-stress-incompressible
+  description: Decompression matrix using deterministic pseudo-random JSON-safe content for large-wire-body and low-compression-ratio coverage
+  tags: [decompression-stress, incompressible, large-wire-body, throughput]
+
+safety:
+  max_cases: 5000
+  max_wire_body_size: 268435456
+  max_decompressed_size: 8388608
+
+generation:
+  formats: [json, text]
+  algorithms: [gzip, deflate, raw-deflate, br]
+  variants: [standard, gzip-members, sync-flush, stored-blocks, nested-same, nested-mixed]
+  decompressed_sizes: [1048576, 8388608]
+  gzip_members:
+    counts: [2, 8, 32]
+  sync_flush:
+    chunk_sizes: [64, 1024, 16384]
+  nesting:
+    depths: [2, 3]
+  content:
+    profile: incompressible
+    seed_text: A
+    random_seed: 42
