@@ -1,0 +1,39 @@
+version: 1
+profile: parser-stress
+
+output:
+  file: payloads/parser-stress-large-body.jsonl
+  request_path: /waf-test/parser-stress-large-body
+  overwrite: false
+
+metadata:
+  suite_name: parser-stress-large-body
+  description: Focused large parser values with bounded structure fan-out
+  tags: [parser-stress, large-body, focused]
+
+safety:
+  max_cases: 1000
+  max_wire_body_size: 134217728
+  max_decompressed_size: 134217728
+
+generation:
+  formats: [json, form, xml, multipart, text]
+  sizes:
+    mode: explicit
+    values: [65536]
+  charsets:
+    declared: [utf-8]
+    modes: [valid, mismatch, invalid-tail, truncated-code-unit]
+    bom: [false]
+  filler_kinds: [repeated, unicode, escape-json, escape-xml, escape-form]
+  value_encoding_profile: plain
+  compressions: [none]
+  structures:
+    depth: 8
+    width: 1
+    fields: 1
+    field_name_lengths: [256, 8192]
+    multipart_boundary_lengths: [70, 8192]
+  invalid_compression:
+    enabled: false
+    modes: [truncated, bad-tail, bitflip]
