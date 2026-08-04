@@ -6,6 +6,7 @@ import argparse
 import base64
 import gzip
 import hashlib
+import random
 import zlib
 from typing import Any, Iterable
 
@@ -17,6 +18,8 @@ except ImportError:  # pragma: no cover
 DEFAULT_DECOMPRESSED_SIZES = [1024 * 1024, 8 * 1024 * 1024, 64 * 1024 * 1024]
 ALGORITHMS = ["gzip", "deflate", "raw-deflate", "br"]
 VARIANTS = ["standard", "gzip-members", "sync-flush", "stored-blocks", "nested-same", "nested-mixed"]
+CONTENT_PROFILES = ["highly-compressible", "medium-compressible", "incompressible"]
+SAFE_RANDOM_ALPHABET = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,7 +37,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--flush-chunk-sizes", nargs="+", type=int, default=[64, 1024, 16384])
     parser.add_argument("--nested-depths", nargs="+", type=int, default=[2, 3])
     parser.add_argument("--max-decompressed-size", type=int, default=256 * 1024 * 1024)
-    parser.add_argument("--seed-text", default="A", help="Highly compressible repeated text pattern")
+    parser.add_argument("--content-profile", choices=CONTENT_PROFILES, default="highly-compressible")
+    parser.add_argument("--seed-text", default="A", help="Repeated text pattern for compressible profiles")
+    parser.add_argument("--random-seed", type=int, default=42, help="Deterministic seed for mixed/random profiles")
     args = parser.parse_args()
 
     numeric_groups = {
@@ -48,6 +53,8 @@ def parse_args() -> argparse.Namespace:
             parser.error(f"--{option} values must be positive")
     if args.max_decompressed_size < 1:
         parser.error("--max-decompressed-size must be positive")
+    if args.random_seed < 1:
+        parser.error("--random-seed must be positive")
     too_large = [size for size in args.decompressed_sizes if size > args.max_decompressed_size]
     if too_large:
         parser.error(
@@ -62,14 +69,46 @@ def repeat_bytes(pattern: bytes, size: int) -> bytes:
     return (pattern * (size // len(pattern) + 1))[:size]
 
 
-def build_serialized_body(fmt: str, target_size: int, seed_text: str) -> bytes:
-    pattern = seed_text.encode("utf-8")
+def deterministic_ascii(size: int, seed: int) -> bytes:
+    """Return reproducible JSON-safe pseudo-random ASCII without a huge temporary list."""
+    rng = random.Random(seed)
+    output = bytearray()
+    chunk_size = 1024 * 1024
+    alphabet = SAFE_RANDOM_ALPHABET
+    while len(output) < size:
+        take = min(chunk_size, size - len(output))
+        raw = rng.randbytes(take)
+        output.extend(alphabet[value % len(alphabet)] for value in raw)
+    return bytes(output)
+
+
+def build_profile_payload(profile: str, size: int, seed_text: str, random_seed: int) -> bytes:
+    repeated = repeat_bytes(seed_text.encode("utf-8"), size)
+    if profile == "highly-compressible":
+        return repeated
+    random_data = deterministic_ascii(size, random_seed + size)
+    if profile == "incompressible":
+        return random_data
+    if profile == "medium-compressible":
+        # Deterministic 4 KiB blocks: three repeated blocks followed by one random block.
+        block_size = 4096
+        output = bytearray()
+        for offset in range(0, size, block_size):
+            end = min(size, offset + block_size)
+            source = random_data if (offset // block_size) % 4 == 3 else repeated
+            output.extend(source[offset:end])
+        return bytes(output)
+    raise ValueError(f"unsupported content profile: {profile}")
+
+
+def build_serialized_body(fmt: str, target_size: int, content_profile: str, seed_text: str, random_seed: int) -> bytes:
     if fmt == "text":
-        return repeat_bytes(pattern, target_size)
+        return build_profile_payload(content_profile, target_size, seed_text, random_seed)
     prefix = b'{"data":"'
     suffix = b'"}'
     payload_size = max(0, target_size - len(prefix) - len(suffix))
-    body = prefix + repeat_bytes(pattern, payload_size) + suffix
+    payload = build_profile_payload(content_profile, payload_size, seed_text, random_seed)
+    body = prefix + payload + suffix
     if len(body) < target_size:
         body += b" " * (target_size - len(body))
     return body[:target_size]
@@ -161,9 +200,9 @@ def variants_for(data: bytes, algorithms: list[str], variants: list[str], args: 
                 yield "nested-mixed", apply_chain(data, chain), chain, {"nested_depth": len(chain)}
 
 
-def make_case(case_number: int, fmt: str, serialized: bytes, variant: str, wire: bytes, chain: list[str], details: dict[str, Any], path: str) -> dict[str, Any]:
+def make_case(case_number: int, fmt: str, serialized: bytes, variant: str, wire: bytes, chain: list[str], details: dict[str, Any], path: str, content_profile: str, random_seed: int) -> dict[str, Any]:
     encoding_header = ", ".join(content_encoding_name(item) for item in chain)
-    case_id = f"decomp-{case_number:06d}-{fmt}-{variant}-{'-'.join(chain)}-{len(serialized)}"
+    case_id = f"decomp-{case_number:06d}-{fmt}-{content_profile}-{variant}-{'-'.join(chain)}-{len(serialized)}"
     ratio = len(serialized) / max(1, len(wire))
     return {
         "id": case_id,
@@ -186,6 +225,8 @@ def make_case(case_number: int, fmt: str, serialized: bytes, variant: str, wire:
             "format": fmt,
             "structure": "single",
             "validity": "valid",
+            "content_profile": content_profile,
+            "content_random_seed": random_seed,
             "compression": content_encoding_name(chain[-1]),
             "compression_variant": variant,
             "content_encoding_chain": [content_encoding_name(item) for item in chain],
@@ -204,7 +245,10 @@ def iter_cases(args: argparse.Namespace) -> Iterable[dict[str, Any]]:
         print("Warning: brotli is unavailable; br cases are skipped.")
     for fmt in args.formats:
         for target_size in args.decompressed_sizes:
-            serialized = build_serialized_body(fmt, target_size, args.seed_text)
+            serialized = build_serialized_body(fmt, target_size, args.content_profile, args.seed_text, args.random_seed)
             for variant, wire, chain, details in variants_for(serialized, args.algorithms, args.variants, args):
                 case_number += 1
-                yield make_case(case_number, fmt, serialized, variant, wire, chain, details, args.path)
+                yield make_case(
+                    case_number, fmt, serialized, variant, wire, chain, details,
+                    args.path, args.content_profile, args.random_seed,
+                )
