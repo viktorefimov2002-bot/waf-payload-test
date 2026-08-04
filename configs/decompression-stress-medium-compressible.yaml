@@ -1,0 +1,33 @@
+version: 1
+profile: decompression-stress
+
+output:
+  file: payloads/decompression-stress-medium-compressible.jsonl
+  request_path: /waf-test/decompression-stress/medium-compressible
+  overwrite: false
+
+metadata:
+  suite_name: decompression-stress-medium-compressible
+  description: Decompression matrix using mixed repeated and deterministic pseudo-random blocks for realistic medium compression ratios
+  tags: [decompression-stress, medium-compressible, throughput, full-coverage]
+
+safety:
+  max_cases: 5000
+  max_wire_body_size: 268435456
+  max_decompressed_size: 33554432
+
+generation:
+  formats: [json, text]
+  algorithms: [gzip, deflate, raw-deflate, br]
+  variants: [standard, gzip-members, sync-flush, stored-blocks, nested-same, nested-mixed]
+  decompressed_sizes: [1048576, 8388608, 33554432]
+  gzip_members:
+    counts: [2, 8, 32]
+  sync_flush:
+    chunk_sizes: [64, 1024, 16384]
+  nesting:
+    depths: [2, 3]
+  content:
+    profile: medium-compressible
+    seed_text: A
+    random_seed: 42
