@@ -16,12 +16,14 @@ EXECUTION_COMMON = {
     "mode", "batch_size", "rps", "duration", "cooldown", "graceful_stop",
     "threshold_mode", "batch_max_duration",
 }
-EXECUTION_HIGH_RPS = EXECUTION_COMMON | {"preallocated_vus", "max_vus"}
+EXECUTION_HIGH_RPS = EXECUTION_COMMON | {
+    "preallocated_vus", "max_vus", "lanes", "max_total_rps",
+}
 SELECTION_KEYS = {
     "start_index", "limit", "case_id", "formats", "structures", "value_encodings",
     "charsets", "compressions", "validities", "list_only",
 }
-OUTPUT_KEYS = {"results_dir", "print_request", "terminate_timeout"}
+OUTPUT_KEYS = {"results_dir", "print_request", "terminate_timeout", "lane_journals"}
 
 
 class RunConfigError(ValueError):
@@ -130,6 +132,8 @@ def load_run_config(path: str | Path, *, target_override: str | None = None, pay
         batch_max_duration=_string(execution.get("batch_max_duration"), "execution.batch_max_duration", default="24h"),
         preallocated_vus=_int(execution.get("preallocated_vus"), "execution.preallocated_vus", minimum=1),
         max_vus=_int(execution.get("max_vus"), "execution.max_vus", minimum=1),
+        lanes=_int(execution.get("lanes"), "execution.lanes", minimum=1, default=1),
+        max_total_rps=_int(execution.get("max_total_rps"), "execution.max_total_rps", minimum=1),
         start_index=_int(selection.get("start_index"), "selection.start_index", minimum=0, default=0),
         limit=_int(selection.get("limit"), "selection.limit", minimum=1),
         case_id=_string(selection.get("case_id"), "selection.case_id"),
@@ -143,11 +147,22 @@ def load_run_config(path: str | Path, *, target_override: str | None = None, pay
         print_request=print_request,
         results_dir=_string(output.get("results_dir"), "output.results_dir", default="results"),
         terminate_timeout=_number(output.get("terminate_timeout"), "output.terminate_timeout", minimum=0.1, default=10.0),
+        lane_journals=bool(output.get("lane_journals", True)),
         run_config_file=str(config_path),
         run_config_name=_string(data.get("name"), "name", default=config_path.stem),
     )
-    if mode != "high-rps" and (namespace.preallocated_vus is not None or namespace.max_vus is not None):
-        raise RunConfigError("preallocated_vus and max_vus are allowed only for high-rps mode")
+    if mode != "high-rps" and (
+        namespace.preallocated_vus is not None
+        or namespace.max_vus is not None
+        or namespace.lanes != 1
+        or namespace.max_total_rps is not None
+    ):
+        raise RunConfigError("preallocated_vus, max_vus, lanes and max_total_rps are allowed only for high-rps mode")
     if namespace.preallocated_vus and namespace.max_vus and namespace.preallocated_vus > namespace.max_vus:
         raise RunConfigError("execution.preallocated_vus must not exceed execution.max_vus")
+    total_rps = namespace.rps * namespace.lanes
+    if namespace.max_total_rps is not None and total_rps > namespace.max_total_rps:
+        raise RunConfigError(
+            f"execution.rps * execution.lanes ({total_rps}) exceeds execution.max_total_rps ({namespace.max_total_rps})"
+        )
     return namespace
