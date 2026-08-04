@@ -20,8 +20,8 @@ generation:
   formats: [json, form, xml, multipart, text]
   sizes:
     mode: explicit
-    # Size is applied to each repeated value. Deep-wide and repeated-field structures
-    # therefore need smaller per-node values than focused large-body tests.
+    # Size is applied to each repeated value. The general full suite keeps fan-out
+    # moderate; extreme deep-wide coverage lives in a focused config.
     values: [1, 256, 1024]
   charsets:
     declared: [utf-8, utf-16le]
@@ -31,11 +31,11 @@ generation:
   value_encoding_profile: plain
   compressions: [none]
   structures:
-    depth: 64
-    width: 256
+    depth: 32
+    width: 64
     fields: 1024
-    field_name_lengths: [256, 8192]
-    multipart_boundary_lengths: [70, 8192]
+    field_name_lengths: [64, 256]
+    multipart_boundary_lengths: [70, 256]
   invalid_compression:
     enabled: false
     modes: [truncated, bad-tail, bitflip]
