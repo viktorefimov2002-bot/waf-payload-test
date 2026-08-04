@@ -20,7 +20,9 @@ generation:
   formats: [json, form, xml, multipart, text]
   sizes:
     mode: explicit
-    values: [1, 1024, 65536]
+    # Size is applied to each repeated value. Deep-wide and repeated-field structures
+    # therefore need smaller per-node values than focused large-body tests.
+    values: [1, 256, 1024]
   charsets:
     declared: [utf-8, utf-16le]
     modes: [valid, mismatch, invalid-tail, truncated-code-unit]
