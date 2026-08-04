@@ -18,7 +18,9 @@ safety:
 
 generation:
   formats: [json, form, xml, multipart, text, octet-stream]
-  sizes: [0, 1024, 65536]
+  # Size is the value/filler length before it is repeated by wide/array/repeated-field structures.
+  # Large single-value bodies are covered separately by baseline-large-body.yaml.
+  sizes: [0, 1024, 8192]
   charsets: [utf-8, utf-16le]
   bom: [false]
   filler_kinds: [repeated, random-ascii, unicode]
