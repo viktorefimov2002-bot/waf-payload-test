@@ -1,0 +1,30 @@
+version: 1
+profile: baseline
+
+output:
+  file: payloads/baseline-large-body.jsonl
+  request_path: /waf-test/baseline-large-body
+  overwrite: false
+
+metadata:
+  suite_name: baseline-large-body
+  description: Focused large-body coverage without multiplying the value across wide structures
+  tags: [baseline, large-body, focused]
+
+safety:
+  max_cases: 1000
+  max_wire_body_size: 67108864
+  max_decompressed_size: 67108864
+
+generation:
+  formats: [json, form, xml, multipart, text, octet-stream]
+  sizes: [65536]
+  charsets: [utf-8, utf-16le]
+  bom: [false]
+  filler_kinds: [repeated, unicode]
+  value_encoding_profile: recommended
+  compressions: [none, gzip]
+  structures:
+    depth: 8
+    width: 1
+    fields: 1
