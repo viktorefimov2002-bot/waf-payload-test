@@ -18,7 +18,9 @@ CONFIGS = [
     "parser-stress-large-body.yaml",
     "parser-stress-deep-wide.yaml",
     "decompression-stress-smoke.yaml",
-    "decompression-stress-full.yaml",
+    "decompression-stress-highly-compressible.yaml",
+    "decompression-stress-medium-compressible.yaml",
+    "decompression-stress-incompressible.yaml",
 ]
 
 
@@ -63,6 +65,21 @@ def test_large_body_configs_keep_focused_64k_coverage():
     assert parser.args.width == parser.args.fields == 1
 
 
+def test_decompression_content_profiles_and_size_bounds():
+    highly = load_config("configs/decompression-stress-highly-compressible.yaml")
+    medium = load_config("configs/decompression-stress-medium-compressible.yaml")
+    incompressible = load_config("configs/decompression-stress-incompressible.yaml")
+
+    assert highly.args.content_profile == "highly-compressible"
+    assert medium.args.content_profile == "medium-compressible"
+    assert incompressible.args.content_profile == "incompressible"
+    assert highly.args.decompressed_sizes == [1048576, 8388608, 67108864]
+    assert medium.args.decompressed_sizes == [1048576, 8388608, 33554432]
+    assert incompressible.args.decompressed_sizes == [1048576, 8388608]
+    assert highly.args.algorithms == medium.args.algorithms == incompressible.args.algorithms
+    assert highly.args.variants == medium.args.variants == incompressible.args.variants
+
+
 def test_baseline_rejects_parser_only_option(tmp_path: Path):
     config = yaml.safe_load(Path("configs/baseline-smoke.yaml").read_text(encoding="utf-8"))
     config["generation"]["charset_modes"] = ["mismatch"]
@@ -86,4 +103,13 @@ def test_decompression_size_cannot_exceed_safety(tmp_path: Path):
     path = tmp_path / "too-large.yaml"
     path.write_text(yaml.safe_dump(config), encoding="utf-8")
     with pytest.raises(ConfigError, match="max_decompressed_size"):
+        load_config(path)
+
+
+def test_decompression_rejects_unknown_content_profile(tmp_path: Path):
+    config = yaml.safe_load(Path("configs/decompression-stress-smoke.yaml").read_text(encoding="utf-8"))
+    config["generation"].setdefault("content", {})["profile"] = "unknown"
+    path = tmp_path / "invalid-profile.yaml"
+    path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    with pytest.raises(ConfigError, match="content.profile"):
         load_config(path)
