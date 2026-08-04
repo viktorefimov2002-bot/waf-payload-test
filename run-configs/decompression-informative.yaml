@@ -5,7 +5,7 @@ target:
   url: https://waf.example.invalid
 
 input:
-  payload_file: payloads/decompression-stress-full.jsonl
+  payload_file: payloads/decompression-stress-highly-compressible.jsonl
   k6_script: k6_run_payloads.js
 
 execution:
