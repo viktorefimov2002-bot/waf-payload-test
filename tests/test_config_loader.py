@@ -12,8 +12,10 @@ from modules.validated_config import load_config
 CONFIGS = [
     "baseline-smoke.yaml",
     "baseline-full.yaml",
+    "baseline-large-body.yaml",
     "parser-stress-smoke.yaml",
     "parser-stress-full.yaml",
+    "parser-stress-large-body.yaml",
     "decompression-stress-smoke.yaml",
     "decompression-stress-full.yaml",
 ]
@@ -33,6 +35,22 @@ def test_optimized_full_structural_configs_have_practical_scale():
     parser = load_config("configs/parser-stress-full.yaml")
     assert 3000 <= baseline.estimated_cases <= 5000
     assert 3000 <= parser.estimated_cases <= 5000
+
+
+def test_full_configs_bound_repeated_value_sizes():
+    baseline = load_config("configs/baseline-full.yaml")
+    parser = load_config("configs/parser-stress-full.yaml")
+    assert max(baseline.args.sizes) <= 8192
+    assert max(parser.args.sizes) <= 1024
+
+
+def test_large_body_configs_keep_focused_64k_coverage():
+    baseline = load_config("configs/baseline-large-body.yaml")
+    parser = load_config("configs/parser-stress-large-body.yaml")
+    assert baseline.args.sizes == [65536]
+    assert parser.args.sizes == [65536]
+    assert baseline.args.width == baseline.args.fields == 1
+    assert parser.args.width == parser.args.fields == 1
 
 
 def test_baseline_rejects_parser_only_option(tmp_path: Path):
