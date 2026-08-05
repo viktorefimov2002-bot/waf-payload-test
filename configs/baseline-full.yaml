@@ -17,6 +17,8 @@ safety:
   max_decompressed_size: 67108864
 
 generation:
+  # Base value appended after the generated filler. Change it here instead of using --payload.
+  payload: normal-client-value
   formats: [json, form, xml, multipart, text, octet-stream]
   # Size is the value/filler length before it is repeated by wide/array/repeated-field structures.
   # Large single-value bodies are covered separately by baseline-large-body.yaml.
