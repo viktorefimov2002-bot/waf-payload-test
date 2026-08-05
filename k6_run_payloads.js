@@ -16,6 +16,10 @@ const thresholdMode = __ENV.THRESHOLD_MODE || 'disabled';
 const lanes = Math.max(1, Number.parseInt(__ENV.PARALLEL_LANES || '1', 10));
 const preAllocatedVUs = Number.parseInt(__ENV.PREALLOCATED_VUS || String(Math.max(10, Math.ceil(rate / 5))), 10);
 const maxVUs = Number.parseInt(__ENV.MAX_VUS || String(Math.max(preAllocatedVUs, rate * 2)), 10);
+const abortOnOverload = (__ENV.ABORT_ON_OVERLOAD || 'false').toLowerCase() === 'true';
+const maxDroppedIterations = Number.parseInt(__ENV.MAX_DROPPED_ITERATIONS || '0', 10);
+const maxP95Ms = Number.parseFloat(__ENV.MAX_HTTP_REQ_DURATION_P95_MS || '0');
+const overloadDelay = __ENV.OVERLOAD_DELAY || '5s';
 const batchMode = cases.length > 1;
 const highRpsMode = runMode === 'high-rps';
 
@@ -41,14 +45,47 @@ function secondsDuration(value) {
     return `${Math.round(value * 1000) / 1000}s`;
 }
 
-const thresholds = thresholdMode === 'strict' ? {
-    http_req_failed: ['rate<0.05'],
-    dropped_iterations: ['count==0'],
-} : {};
+function addPerScenarioSubmetrics(target) {
+    if (!highRpsMode) return;
+    for (let offset = 0; offset < cases.length; offset += 1) {
+        const scenario = `payload_${offset}`;
+        target[`http_reqs{scenario:${scenario}}`] = ['count>=0'];
+        target[`http_req_duration{scenario:${scenario}}`] = ['p(95)>=0'];
+        target[`http_req_failed{scenario:${scenario}}`] = ['rate>=0'];
+        target[`dropped_iterations{scenario:${scenario}}`] = ['count>=0'];
+        target[`iterations{scenario:${scenario}}`] = ['count>=0'];
+    }
+}
+
+function buildThresholds() {
+    const result = {};
+    if (thresholdMode === 'strict') {
+        result.http_req_failed = ['rate<0.05'];
+        result.dropped_iterations = ['count==0'];
+    }
+    if (abortOnOverload) {
+        result.dropped_iterations = [{
+            threshold: `count<=${maxDroppedIterations}`,
+            abortOnFail: true,
+            delayAbortEval: overloadDelay,
+        }];
+        if (maxP95Ms > 0) {
+            result.http_req_duration = [{
+                threshold: `p(95)<${maxP95Ms}`,
+                abortOnFail: true,
+                delayAbortEval: overloadDelay,
+            }];
+        }
+    }
+    addPerScenarioSubmetrics(result);
+    return result;
+}
+
+const thresholds = buildThresholds();
 
 function buildHighRpsScenarios() {
     const scenarios = {};
-    const slotSeconds = durationSeconds(duration) + cooldown;
+    const slotSeconds = durationSeconds(duration) + durationSeconds(gracefulStop) + cooldown;
     for (let offset = 0; offset < cases.length; offset += 1) {
         const currentCase = cases[offset];
         const index = caseIndex(currentCase, offset);
@@ -173,7 +210,12 @@ export function setup() {
         duration,
         cooldown,
         graceful_stop: gracefulStop,
+        slot_seconds: durationSeconds(duration) + durationSeconds(gracefulStop) + cooldown,
         threshold_mode: thresholdMode,
+        abort_on_overload: abortOnOverload,
+        max_dropped_iterations: maxDroppedIterations,
+        max_http_req_duration_p95_ms: maxP95Ms,
+        overload_delay: overloadDelay,
         preallocated_vus_per_case: preAllocatedVUs,
         max_vus_per_case: maxVUs,
     }));
@@ -216,17 +258,17 @@ export function runHighRpsCase() {
 
 export function highRpsLaneController() {
     const lane = Number.parseInt(__ENV.CASE_LANE || '0', 10);
-    const seconds = durationSeconds(duration);
+    const activeSeconds = durationSeconds(duration) + durationSeconds(gracefulStop);
     for (let offset = lane; offset < cases.length; offset += lanes) {
         const currentCase = cases[offset];
         const index = caseIndex(currentCase, offset);
         event('CASE_START', currentCase, index, {
             mode: 'high-rps', lane, target_rps: rate, scheduled_duration: duration,
         });
-        sleep(seconds);
+        sleep(activeSeconds);
         event('CASE_END', currentCase, index, {
             mode: 'high-rps', lane, target_rps: rate, scheduled_duration: duration,
-            expected_requests: Math.round(rate * seconds),
+            expected_requests: Math.round(rate * durationSeconds(duration)),
         });
         if (cooldown > 0 && offset + lanes < cases.length) sleep(cooldown);
     }
