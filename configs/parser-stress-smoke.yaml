@@ -17,6 +17,8 @@ safety:
   max_decompressed_size: 16777216
 
 generation:
+  # Base value appended after the generated filler. Change it here instead of using --payload.
+  payload: normal-client-value
   formats: [json, form, xml, multipart, text]
   sizes:
     mode: explicit
