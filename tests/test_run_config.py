@@ -12,6 +12,7 @@ RUN_CONFIGS = [
     "decompression-informative.yaml",
     "high-rps-recheck.yaml",
     "high-rps-parallel.yaml",
+    "high-rps-single-case.yaml",
 ]
 
 
@@ -20,7 +21,7 @@ def test_repository_run_configs_validate():
         args = load_run_config(Path("run-configs") / name)
         assert args.mode in {"fast", "informative", "high-rps"}
         assert args.payload_file.startswith("payloads/")
-        assert args.results_dir == "results"
+        assert args.results_dir.startswith("results")
         assert args.lanes >= 1
 
 
@@ -76,9 +77,30 @@ def test_parallel_preset_has_expected_scope():
     args = load_run_config("run-configs/high-rps-parallel.yaml")
     assert args.mode == "high-rps"
     assert args.lanes == 4
-    assert args.rps == 30
-    assert args.rps * args.lanes == args.max_total_rps == 120
+    assert args.rps * args.lanes == args.max_total_rps
+    assert args.abort_on_overload is True
+    assert args.max_dropped_iterations == 10
+    assert args.max_http_req_duration_p95_ms == 3000
+    assert args.stop_run_on_batch_abort is True
     assert args.lane_journals is True
+
+
+def test_single_case_preset_is_serial_and_guarded():
+    args = load_run_config("run-configs/high-rps-single-case.yaml")
+    assert args.batch_size == 1
+    assert args.lanes == 1
+    assert args.case_id
+    assert args.abort_on_overload is True
+    assert args.max_dropped_iterations == 0
+
+
+def test_invalid_overload_boolean_is_rejected(tmp_path: Path):
+    config = yaml.safe_load(Path("run-configs/high-rps-parallel.yaml").read_text(encoding="utf-8"))
+    config["execution"]["abort_on_overload"] = "yes"
+    path = tmp_path / "invalid.yaml"
+    path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    with pytest.raises(RunConfigError, match="true or false"):
+        load_run_config(path)
 
 
 def test_cli_overrides_target():
