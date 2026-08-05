@@ -12,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Iterator
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 
 class CaseCurlError(RuntimeError):
@@ -88,8 +88,12 @@ def decode_wire_body(case: dict[str, Any]) -> bytes:
 
 
 def request_url(target: str, path: str) -> str:
-    base = target.rstrip("/") + "/"
-    return urljoin(base, path.lstrip("/"))
+    """Use the target origin and replace any target path with the case path."""
+    parsed = urlsplit(target)
+    if not parsed.scheme or not parsed.netloc:
+        raise CaseCurlError(f"target must be an absolute URL: {target}")
+    origin = urlunsplit((parsed.scheme, parsed.netloc, "/", "", ""))
+    return urljoin(origin, path.lstrip("/"))
 
 
 def normalized_headers(case: dict[str, Any], *, include_debug_headers: bool) -> list[tuple[str, str]]:
@@ -153,7 +157,7 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument("case_id", help="Exact case id from the payload manifest")
     result.add_argument("--manifest", default="payloads/baseline-full.jsonl")
-    result.add_argument("--target", required=True, help="Base target URL")
+    result.add_argument("--target", required=True, help="Base target URL; its path is ignored")
     result.add_argument(
         "--output-dir",
         default="debug-artifacts/curl-cases",
