@@ -25,12 +25,12 @@ execution:
   max_vus: 80
 
   # A slot is duration + graceful_stop + cooldown, so adjacent waves do not overlap.
-  # Abort the current k6 batch and stop the outer run when the target degrades.
-  abort_on_overload: true
+  # Explicit YAML bool tags prevent accidental string interpretation after edits.
+  abort_on_overload: !!bool true
   max_dropped_iterations: 10
   max_http_req_duration_p95_ms: 3000
   overload_delay: 5s
-  stop_run_on_batch_abort: true
+  stop_run_on_batch_abort: !!bool true
 
   threshold_mode: disabled
   batch_max_duration: 24h
@@ -42,4 +42,4 @@ output:
   results_dir: results
   print_request: none
   terminate_timeout: 15
-  lane_journals: true
+  lane_journals: !!bool true
