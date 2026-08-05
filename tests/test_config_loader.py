@@ -45,8 +45,14 @@ def test_all_repository_configs_validate():
 
 def test_structural_configs_expose_payload_value():
     for name in STRUCTURAL_CONFIGS:
-        loaded = load_config(Path("configs") / name)
-        assert loaded.args.payload == "normal-client-value"
+        path = Path("configs") / name
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        configured_payload = raw["generation"]["payload"]
+        loaded = load_config(path)
+
+        assert isinstance(configured_payload, str)
+        assert configured_payload
+        assert loaded.args.payload == configured_payload
 
 
 def test_yaml_payload_value_is_mapped_to_generator_args(tmp_path: Path):
