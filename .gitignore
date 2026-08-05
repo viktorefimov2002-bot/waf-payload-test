@@ -4,6 +4,7 @@ payloads/*.jsonl.gz
 payloads/*.tmp
 !payloads/.gitkeep
 results/
+debug-artifacts/
 __pycache__/
 *.pyc
 .pytest_cache/
