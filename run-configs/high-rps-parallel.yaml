@@ -16,13 +16,22 @@ execution:
   rps: 30
   duration: 5s
   cooldown: 1
+  graceful_stop: 2s
   lanes: 4
   # Safety guard: lanes * rps must not exceed this value.
   max_total_rps: 120
   # These limits are per active case scenario.
   preallocated_vus: 20
   max_vus: 80
-  graceful_stop: 2s
+
+  # A slot is duration + graceful_stop + cooldown, so adjacent waves do not overlap.
+  # Abort the current k6 batch and stop the outer run when the target degrades.
+  abort_on_overload: true
+  max_dropped_iterations: 10
+  max_http_req_duration_p95_ms: 3000
+  overload_delay: 5s
+  stop_run_on_batch_abort: true
+
   threshold_mode: disabled
   batch_max_duration: 24h
 
