@@ -23,6 +23,16 @@ CONFIGS = [
     "decompression-stress-incompressible.yaml",
 ]
 
+STRUCTURAL_CONFIGS = [
+    "baseline-smoke.yaml",
+    "baseline-full.yaml",
+    "baseline-large-body.yaml",
+    "parser-stress-smoke.yaml",
+    "parser-stress-full.yaml",
+    "parser-stress-large-body.yaml",
+    "parser-stress-deep-wide.yaml",
+]
+
 
 def test_all_repository_configs_validate():
     for name in CONFIGS:
@@ -31,6 +41,21 @@ def test_all_repository_configs_validate():
         assert loaded.estimated_cases > 0
         assert loaded.estimated_cases <= loaded.safety["max_cases"]
         assert loaded.output_file.parent == Path("payloads")
+
+
+def test_structural_configs_expose_payload_value():
+    for name in STRUCTURAL_CONFIGS:
+        loaded = load_config(Path("configs") / name)
+        assert loaded.args.payload == "normal-client-value"
+
+
+def test_yaml_payload_value_is_mapped_to_generator_args(tmp_path: Path):
+    config = yaml.safe_load(Path("configs/baseline-smoke.yaml").read_text(encoding="utf-8"))
+    config["generation"]["payload"] = "custom-yaml-payload"
+    path = tmp_path / "custom-payload.yaml"
+    path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    loaded = load_config(path)
+    assert loaded.args.payload == "custom-yaml-payload"
 
 
 def test_optimized_full_structural_configs_have_practical_scale():
