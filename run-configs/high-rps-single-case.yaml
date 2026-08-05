@@ -1,0 +1,33 @@
+version: 1
+name: high-rps-single-case
+
+target:
+  url: https://jutcy.glazapp.com
+
+input:
+  payload_file: payloads/baseline-full.jsonl
+  k6_script: k6_run_payloads.js
+
+execution:
+  mode: high-rps
+  batch_size: 1
+  rps: 5
+  duration: 10s
+  cooldown: 5
+  graceful_stop: 2s
+  threshold_mode: disabled
+  batch_max_duration: 24h
+  preallocated_vus: 10
+  max_vus: 40
+  lanes: 1
+  max_total_rps: 5
+
+selection:
+  # Replace this value with the exact case id to recheck.
+  case_id: case-000442-json-wide-json-unicode-escape-utf-8-valid-none-valid
+
+output:
+  results_dir: results/single-case-recheck
+  print_request: headers
+  terminate_timeout: 10
+  lane_journals: true
