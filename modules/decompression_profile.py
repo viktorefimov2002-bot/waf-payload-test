@@ -90,7 +90,6 @@ def build_profile_payload(profile: str, size: int, seed_text: str, random_seed: 
     if profile == "incompressible":
         return random_data
     if profile == "medium-compressible":
-        # Deterministic 4 KiB blocks: three repeated blocks followed by one random block.
         block_size = 4096
         output = bytearray()
         for offset in range(0, size, block_size):
@@ -241,14 +240,17 @@ def make_case(case_number: int, fmt: str, serialized: bytes, variant: str, wire:
 
 def iter_cases(args: argparse.Namespace) -> Iterable[dict[str, Any]]:
     case_number = 0
+    content_profile = getattr(args, "content_profile", "highly-compressible")
+    random_seed = getattr(args, "random_seed", 42)
+    seed_text = getattr(args, "seed_text", "A")
     if "br" in args.algorithms and brotli is None:
         print("Warning: brotli is unavailable; br cases are skipped.")
     for fmt in args.formats:
         for target_size in args.decompressed_sizes:
-            serialized = build_serialized_body(fmt, target_size, args.content_profile, args.seed_text, args.random_seed)
+            serialized = build_serialized_body(fmt, target_size, content_profile, seed_text, random_seed)
             for variant, wire, chain, details in variants_for(serialized, args.algorithms, args.variants, args):
                 case_number += 1
                 yield make_case(
                     case_number, fmt, serialized, variant, wire, chain, details,
-                    args.path, args.content_profile, args.random_seed,
+                    args.path, content_profile, random_seed,
                 )
