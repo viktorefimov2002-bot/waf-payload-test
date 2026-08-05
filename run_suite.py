@@ -59,23 +59,28 @@ def cli_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--config", help="Strict YAML run configuration")
-    parser.add_argument("--validate-only", action="store_true", help="Validate configuration and files without running k6")
+    parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--target", metavar="URL")
-    parser.add_argument("--payload-file", default="payloads/baseline-smoke.jsonl")
-    parser.add_argument("--k6-script", default="k6_run_payloads.js")
-    parser.add_argument("--mode", choices=["fast", "informative", "high-rps"], default="fast")
+    parser.add_argument("--payload-file")
+    parser.add_argument("--k6-script")
+    parser.add_argument("--mode", choices=["fast", "informative", "high-rps"])
     parser.add_argument("--batch-size", type=int)
-    parser.add_argument("--rps", type=int, default=10)
-    parser.add_argument("--duration", default="30s")
-    parser.add_argument("--cooldown", type=float, default=5.0)
-    parser.add_argument("--graceful-stop", default="1s")
-    parser.add_argument("--threshold-mode", choices=["disabled", "strict"], default="disabled")
-    parser.add_argument("--batch-max-duration", default="24h")
+    parser.add_argument("--rps", type=int)
+    parser.add_argument("--duration")
+    parser.add_argument("--cooldown", type=float)
+    parser.add_argument("--graceful-stop")
+    parser.add_argument("--threshold-mode", choices=["disabled", "strict"])
+    parser.add_argument("--batch-max-duration")
     parser.add_argument("--preallocated-vus", type=int)
     parser.add_argument("--max-vus", type=int)
-    parser.add_argument("--lanes", type=int, default=1)
+    parser.add_argument("--lanes", type=int)
     parser.add_argument("--max-total-rps", type=int)
-    parser.add_argument("--start-index", type=int, default=0)
+    parser.add_argument("--abort-on-overload", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--max-dropped-iterations", type=int)
+    parser.add_argument("--max-http-req-duration-p95-ms", type=float)
+    parser.add_argument("--overload-delay")
+    parser.add_argument("--stop-run-on-batch-abort", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--start-index", type=int)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--case-id")
     parser.add_argument("--format", dest="formats", action="append")
@@ -84,48 +89,99 @@ def cli_parser() -> argparse.ArgumentParser:
     parser.add_argument("--charset", dest="charsets", action="append")
     parser.add_argument("--compression", dest="compressions", action="append")
     parser.add_argument("--validity", dest="validities", action="append")
-    parser.add_argument("--list", action="store_true")
+    parser.add_argument("--list", action="store_true", default=None)
     parser.add_argument("--print-request", choices=["none", "headers", "full"])
-    parser.add_argument("--results-dir", default="results")
-    parser.add_argument("--terminate-timeout", type=float, default=10.0)
-    parser.add_argument("--lane-journals", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--results-dir")
+    parser.add_argument("--terminate-timeout", type=float)
+    parser.add_argument("--lane-journals", action=argparse.BooleanOptionalAction, default=None)
     return parser
+
+
+def cli_defaults(cli: argparse.Namespace) -> argparse.Namespace:
+    values = vars(cli).copy()
+    values.update({
+        "payload_file": cli.payload_file or "payloads/baseline-smoke.jsonl",
+        "k6_script": cli.k6_script or "k6_run_payloads.js",
+        "mode": cli.mode or "fast",
+        "rps": cli.rps or 10,
+        "duration": cli.duration or "30s",
+        "cooldown": 5.0 if cli.cooldown is None else cli.cooldown,
+        "graceful_stop": cli.graceful_stop or "1s",
+        "threshold_mode": cli.threshold_mode or "disabled",
+        "batch_max_duration": cli.batch_max_duration or "24h",
+        "lanes": cli.lanes or 1,
+        "abort_on_overload": bool(cli.abort_on_overload),
+        "max_dropped_iterations": 0 if cli.max_dropped_iterations is None else cli.max_dropped_iterations,
+        "max_http_req_duration_p95_ms": 0.0 if cli.max_http_req_duration_p95_ms is None else cli.max_http_req_duration_p95_ms,
+        "overload_delay": cli.overload_delay or "5s",
+        "stop_run_on_batch_abort": True if cli.stop_run_on_batch_abort is None else cli.stop_run_on_batch_abort,
+        "start_index": cli.start_index or 0,
+        "list": bool(cli.list),
+        "results_dir": cli.results_dir or "results",
+        "terminate_timeout": 10.0 if cli.terminate_timeout is None else cli.terminate_timeout,
+        "lane_journals": True if cli.lane_journals is None else cli.lane_journals,
+        "run_config_file": None,
+        "run_config_name": None,
+    })
+    return argparse.Namespace(**values)
+
+
+def apply_cli_overrides(args: argparse.Namespace, cli: argparse.Namespace) -> argparse.Namespace:
+    names = (
+        "target", "payload_file", "k6_script", "mode", "batch_size", "rps", "duration",
+        "cooldown", "graceful_stop", "threshold_mode", "batch_max_duration",
+        "preallocated_vus", "max_vus", "lanes", "max_total_rps",
+        "abort_on_overload", "max_dropped_iterations", "max_http_req_duration_p95_ms",
+        "overload_delay", "stop_run_on_batch_abort", "start_index", "limit", "case_id",
+        "formats", "structures", "value_encodings", "charsets", "compressions", "validities",
+        "list", "print_request", "results_dir", "terminate_timeout", "lane_journals",
+    )
+    for name in names:
+        value = getattr(cli, name)
+        if value is not None:
+            setattr(args, name, value)
+    return args
 
 
 def parse_args() -> tuple[argparse.Namespace, bool]:
     parser = cli_parser()
     cli = parser.parse_args()
     if not cli.config:
-        if not cli.target:
+        args = cli_defaults(cli)
+        if not args.target:
             parser.error("--target is required when --config is not used")
-        if cli.mode != "high-rps" and (cli.lanes != 1 or cli.max_total_rps is not None):
-            parser.error("--lanes and --max-total-rps are allowed only for high-rps mode")
-        if cli.max_total_rps is not None and cli.rps * cli.lanes > cli.max_total_rps:
-            parser.error("--rps * --lanes exceeds --max-total-rps")
-        return cli, cli.validate_only
+        return args, cli.validate_only
     from modules.run_config import RunConfigError, load_run_config
     try:
-        args = load_run_config(
-            cli.config,
-            target_override=cli.target,
-            payload_override=None if cli.payload_file == "payloads/baseline-smoke.jsonl" else cli.payload_file,
-        )
+        args = load_run_config(cli.config)
+        args = apply_cli_overrides(args, cli)
     except RunConfigError as exc:
         parser.error(str(exc))
+    if args.case_id:
+        args.batch_size = 1
+        args.lanes = 1
+        if args.max_total_rps is not None and args.rps > args.max_total_rps:
+            parser.error("single-case RPS exceeds max_total_rps")
     return args, cli.validate_only
 
 
 def print_summary(args: argparse.Namespace) -> None:
+    default_batch = 1 if args.mode == "informative" else 10 if args.mode == "high-rps" else 25
     print(f"Mode: {args.mode}")
     print(f"Target: {args.target}")
     print(f"Payload file: {args.payload_file}")
     print(f"k6 script: {args.k6_script}")
-    print(f"Batch size: {args.batch_size or ('1' if args.mode == 'informative' else '10' if args.mode == 'high-rps' else '25')}")
+    print(f"Batch size: {args.batch_size or default_batch}")
     print(f"RPS per active case: {args.rps}")
     print(f"Parallel lanes: {args.lanes}")
     print(f"Maximum active RPS: {args.rps * args.lanes}")
     print(f"Duration: {args.duration}")
+    print(f"Graceful stop: {args.graceful_stop}")
     print(f"Cooldown per lane: {args.cooldown}")
+    print(f"Abort on overload: {args.abort_on_overload}")
+    if args.abort_on_overload:
+        print(f"Maximum dropped iterations per batch: {args.max_dropped_iterations}")
+        print(f"Maximum batch p95: {args.max_http_req_duration_p95_ms} ms")
     print(f"Results dir: {args.results_dir}")
 
 
@@ -225,7 +281,17 @@ def parse_k6_event(line: str) -> dict[str, Any] | None:
     return None
 
 
-def metric(summary: dict[str, Any], name: str, field: str) -> float | None:
+def load_summary(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def metric_from(summary: dict[str, Any], name: str, field: str) -> float | None:
     node = (summary.get("metrics") or {}).get(name)
     if not isinstance(node, dict):
         return None
@@ -235,21 +301,46 @@ def metric(summary: dict[str, Any], name: str, field: str) -> float | None:
     return None
 
 
-def compact_summary(path: Path) -> dict[str, float | None]:
-    if not path.exists():
-        return {}
-    try:
-        summary = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+def compact_summary(summary: dict[str, Any]) -> dict[str, float | None]:
     return {
-        "http_reqs": metric(summary, "http_reqs", "count"),
-        "http_req_failed_rate": metric(summary, "http_req_failed", "rate"),
-        "http_req_duration_p95_ms": metric(summary, "http_req_duration", "p(95)"),
-        "http_req_duration_max_ms": metric(summary, "http_req_duration", "max"),
-        "dropped_iterations": metric(summary, "dropped_iterations", "count"),
-        "checks_rate": metric(summary, "checks", "rate"),
+        "http_reqs": metric_from(summary, "http_reqs", "count"),
+        "http_req_failed_rate": metric_from(summary, "http_req_failed", "rate"),
+        "http_req_duration_p95_ms": metric_from(summary, "http_req_duration", "p(95)"),
+        "http_req_duration_max_ms": metric_from(summary, "http_req_duration", "max"),
+        "dropped_iterations": metric_from(summary, "dropped_iterations", "count"),
+        "checks_rate": metric_from(summary, "checks", "rate"),
     }
+
+
+def per_case_metrics(summary: dict[str, Any], batch: list[tuple[int, dict[str, Any]]], lanes: int) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for offset, (index, case) in enumerate(batch):
+        scenario = f"payload_{offset}"
+        records.append({
+            "index": index,
+            "case_id": case.get("id"),
+            "lane": offset % lanes,
+            "scenario": scenario,
+            "http_reqs": metric_from(summary, f"http_reqs{{scenario:{scenario}}}", "count"),
+            "iterations": metric_from(summary, f"iterations{{scenario:{scenario}}}", "count"),
+            "dropped_iterations": metric_from(summary, f"dropped_iterations{{scenario:{scenario}}}", "count") or 0.0,
+            "http_req_failed_rate": metric_from(summary, f"http_req_failed{{scenario:{scenario}}}", "rate"),
+            "http_req_duration_p95_ms": metric_from(summary, f"http_req_duration{{scenario:{scenario}}}", "p(95)"),
+            "http_req_duration_max_ms": metric_from(summary, f"http_req_duration{{scenario:{scenario}}}", "max"),
+        })
+    return records
+
+
+def overload_reason(args: argparse.Namespace, metrics: dict[str, float | None]) -> str | None:
+    if not args.abort_on_overload:
+        return None
+    dropped = metrics.get("dropped_iterations") or 0.0
+    if dropped > args.max_dropped_iterations:
+        return f"dropped_iterations={dropped:g} exceeds {args.max_dropped_iterations}"
+    p95 = metrics.get("http_req_duration_p95_ms")
+    if args.max_http_req_duration_p95_ms > 0 and p95 is not None and p95 >= args.max_http_req_duration_p95_ms:
+        return f"http_req_duration p95={p95:g}ms exceeds {args.max_http_req_duration_p95_ms:g}ms"
+    return None
 
 
 def request_preview(case: dict[str, Any], mode: str) -> dict[str, Any] | None:
@@ -282,18 +373,19 @@ def main() -> int:
     batch_size = args.batch_size or default_batch
     print_mode = args.print_request or ("headers" if args.mode == "informative" else "none")
     if (
-        args.start_index < 0
-        or (args.limit is not None and args.limit < 1)
-        or batch_size < 1
-        or args.rps < 1
-        or args.cooldown < 0
-        or args.lanes < 1
+        args.start_index < 0 or (args.limit is not None and args.limit < 1) or batch_size < 1
+        or args.rps < 1 or args.cooldown < 0 or args.lanes < 1
+        or args.max_dropped_iterations < 0 or args.max_http_req_duration_p95_ms < 0
     ):
         print("ERROR: invalid numeric option", file=sys.stderr)
         return 2
     if args.mode != "high-rps" and args.lanes != 1:
         print("ERROR: parallel lanes are supported only in high-rps mode", file=sys.stderr)
         return 2
+    if args.max_total_rps is not None and args.rps * args.lanes > args.max_total_rps:
+        print("ERROR: rps * lanes exceeds max_total_rps", file=sys.stderr)
+        return 2
+
     payload_path = Path(args.payload_file).resolve()
     script_path = Path(args.k6_script).resolve()
     if not payload_path.is_file() or not script_path.is_file():
@@ -347,9 +439,9 @@ def main() -> int:
 
     completed = 0
     nonzero = 0
+    overloaded = False
     process: subprocess.Popen[Any] | None = None
     active_cases: dict[int, dict[str, Any]] = {}
-    temp_paths: tuple[Path, Path] | None = None
 
     def write_active_cases() -> None:
         atomic_json(active_cases_file, {
@@ -381,9 +473,8 @@ def main() -> int:
                 atomic_json(case_file, payloads[0] if len(payloads) == 1 else payloads)
                 summary_file = temp_dir / "summary.json"
                 k6_log = temp_dir / "k6.log"
-                temp_paths = (summary_file, k6_log)
-                for path in temp_paths:
-                    path.unlink(missing_ok=True)
+                summary_file.unlink(missing_ok=True)
+                k6_log.unlink(missing_ok=True)
                 env = os.environ.copy()
                 env.update({
                     "TARGET_URL": args.target,
@@ -398,6 +489,10 @@ def main() -> int:
                     "THRESHOLD_MODE": args.threshold_mode,
                     "BATCH_MAX_DURATION": args.batch_max_duration,
                     "PARALLEL_LANES": str(args.lanes),
+                    "ABORT_ON_OVERLOAD": str(args.abort_on_overload).lower(),
+                    "MAX_DROPPED_ITERATIONS": str(args.max_dropped_iterations),
+                    "MAX_HTTP_REQ_DURATION_P95_MS": str(args.max_http_req_duration_p95_ms),
+                    "OVERLOAD_DELAY": args.overload_delay,
                 })
                 if args.preallocated_vus is not None:
                     env["PREALLOCATED_VUS"] = str(args.preallocated_vus)
@@ -438,10 +533,8 @@ def main() -> int:
                                 "event": "CASE_START", "timestamp": utc_now(), "run_id": run_id,
                                 "mode": args.mode, "lane": lane, "index": index,
                                 "case_id": event.get("payload_id"), "sha256": event.get("sha256"),
-                                "wire_body_size": event.get("wire_body_size"),
-                                "metadata": event.get("metadata"),
-                                "target_rps": event.get("target_rps"),
-                                "scheduled_duration": event.get("scheduled_duration"),
+                                "wire_body_size": event.get("wire_body_size"), "metadata": event.get("metadata"),
+                                "target_rps": event.get("target_rps"), "scheduled_duration": event.get("scheduled_duration"),
                                 "request_file": str(request_file),
                             }
                             if case is not None:
@@ -456,13 +549,11 @@ def main() -> int:
                             lane = int(event.get("lane", 0))
                             record = {
                                 "event": "CASE_END", "timestamp": utc_now(), "run_id": run_id,
-                                "mode": args.mode, "lane": lane,
-                                "index": event.get("payload_index"), "case_id": event.get("payload_id"),
-                                "requests": event.get("requests"),
+                                "mode": args.mode, "lane": lane, "index": event.get("payload_index"),
+                                "case_id": event.get("payload_id"), "requests": event.get("requests"),
                                 "expected_requests": event.get("expected_requests"),
                                 "elapsed_seconds": event.get("elapsed_seconds"),
-                                "target_rps": event.get("target_rps"),
-                                "scheduled_duration": event.get("scheduled_duration"),
+                                "target_rps": event.get("target_rps"), "scheduled_duration": event.get("scheduled_duration"),
                             }
                             write_event(record)
                             append_jsonl(case_results, record)
@@ -472,17 +563,37 @@ def main() -> int:
                     exit_code = process.wait()
                     process = None
                 nonzero += int(exit_code != 0)
-                metrics = compact_summary(summary_file)
+                summary = load_summary(summary_file)
+                metrics = compact_summary(summary)
+                for case_metric in per_case_metrics(summary, batch, args.lanes) if args.mode == "high-rps" else []:
+                    record = {
+                        "event": "CASE_METRICS", "timestamp": utc_now(), "run_id": run_id,
+                        "batch": batch_number, **case_metric,
+                    }
+                    append_jsonl(case_results, record)
+                    append_jsonl(journal, record)
+                reason = overload_reason(args, metrics)
                 batch_end = {
                     "event": "BATCH_END", "timestamp": utc_now(), "run_id": run_id,
                     "batch": batch_number, "mode": args.mode, "exit_code": exit_code,
                     "lanes": min(args.lanes, len(batch)), "metrics": metrics,
+                    "overloaded": reason is not None, "overload_reason": reason,
                 }
                 append_jsonl(journal, batch_end)
                 print(json.dumps(batch_end, ensure_ascii=False), flush=True)
                 shutil.copy2(k6_log, results / f"k6-batch-{batch_number:04d}.log")
                 if summary_file.exists():
                     shutil.copy2(summary_file, results / f"summary-batch-{batch_number:04d}.json")
+                if reason is not None and args.stop_run_on_batch_abort:
+                    overloaded = True
+                    abort_record = {
+                        "event": "RUN_ABORTED_OVERLOAD", "timestamp": utc_now(), "run_id": run_id,
+                        "batch": batch_number, "reason": reason, "metrics": metrics,
+                        "case_ids": [case.get("id") for _, case in batch],
+                    }
+                    append_jsonl(journal, abort_record)
+                    print(json.dumps(abort_record, ensure_ascii=False), flush=True)
+                    break
     except KeyboardInterrupt:
         if process is not None:
             terminate(process, args.terminate_timeout)
@@ -504,10 +615,10 @@ def main() -> int:
     append_jsonl(journal, {
         "event": "RUN_END", "timestamp": utc_now(), "run_id": run_id,
         "completed_cases": completed, "nonzero_exit_codes": nonzero,
-        "lanes": args.lanes, "rps_per_case": args.rps,
+        "lanes": args.lanes, "rps_per_case": args.rps, "overloaded": overloaded,
     })
     print(f"Results: {results}")
-    return 0
+    return 4 if overloaded else 0
 
 
 if __name__ == "__main__":
