@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import hashlib
 import json
 import shlex
@@ -69,7 +70,7 @@ def decode_wire_body(case: dict[str, Any]) -> bytes:
         raise CaseCurlError("case does not contain a non-empty body_base64 field")
     try:
         body = base64.b64decode(encoded, validate=True)
-    except (ValueError, base64.binascii.Error) as exc:
+    except (ValueError, binascii.Error) as exc:
         raise CaseCurlError("body_base64 is not valid Base64") from exc
 
     expected_size = case.get("wire_body_size")
@@ -100,7 +101,6 @@ def normalized_headers(case: dict[str, Any], *, include_debug_headers: bool) -> 
     seen = set()
     for name, value in raw.items():
         lower = str(name).lower()
-        # curl calculates Content-Length from the exact file body. Keeping a stale value is unsafe.
         if lower in {"content-length", "host"}:
             continue
         headers.append((str(name), str(value)))
