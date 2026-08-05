@@ -18,6 +18,9 @@ EXECUTION_COMMON = {
 }
 EXECUTION_HIGH_RPS = EXECUTION_COMMON | {
     "preallocated_vus", "max_vus", "lanes", "max_total_rps",
+    "abort_on_overload", "max_dropped_iterations",
+    "max_http_req_duration_p95_ms", "overload_delay",
+    "stop_run_on_batch_abort",
 }
 SELECTION_KEYS = {
     "start_index", "limit", "case_id", "formats", "structures", "value_encodings",
@@ -62,12 +65,20 @@ def _int(value: Any, path: str, *, minimum: int, default: int | None = None) -> 
     return value
 
 
-def _number(value: Any, path: str, *, minimum: float, default: float) -> float:
+def _number(value: Any, path: str, *, minimum: float, default: float | None = None) -> float | None:
     if value is None:
         return default
     if not isinstance(value, (int, float)) or isinstance(value, bool) or value < minimum:
         raise RunConfigError(f"{path} must be a number >= {minimum}")
     return float(value)
+
+
+def _bool(value: Any, path: str, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise RunConfigError(f"{path} must be true or false")
+    return value
 
 
 def _strings(value: Any, path: str) -> list[str] | None:
@@ -134,6 +145,11 @@ def load_run_config(path: str | Path, *, target_override: str | None = None, pay
         max_vus=_int(execution.get("max_vus"), "execution.max_vus", minimum=1),
         lanes=_int(execution.get("lanes"), "execution.lanes", minimum=1, default=1),
         max_total_rps=_int(execution.get("max_total_rps"), "execution.max_total_rps", minimum=1),
+        abort_on_overload=_bool(execution.get("abort_on_overload"), "execution.abort_on_overload", default=False),
+        max_dropped_iterations=_int(execution.get("max_dropped_iterations"), "execution.max_dropped_iterations", minimum=0, default=0),
+        max_http_req_duration_p95_ms=_number(execution.get("max_http_req_duration_p95_ms"), "execution.max_http_req_duration_p95_ms", minimum=0, default=0.0),
+        overload_delay=_string(execution.get("overload_delay"), "execution.overload_delay", default="5s"),
+        stop_run_on_batch_abort=_bool(execution.get("stop_run_on_batch_abort"), "execution.stop_run_on_batch_abort", default=True),
         start_index=_int(selection.get("start_index"), "selection.start_index", minimum=0, default=0),
         limit=_int(selection.get("limit"), "selection.limit", minimum=1),
         case_id=_string(selection.get("case_id"), "selection.case_id"),
@@ -156,8 +172,9 @@ def load_run_config(path: str | Path, *, target_override: str | None = None, pay
         or namespace.max_vus is not None
         or namespace.lanes != 1
         or namespace.max_total_rps is not None
+        or namespace.abort_on_overload
     ):
-        raise RunConfigError("preallocated_vus, max_vus, lanes and max_total_rps are allowed only for high-rps mode")
+        raise RunConfigError("high-rps execution options are allowed only for high-rps mode")
     if namespace.preallocated_vus and namespace.max_vus and namespace.preallocated_vus > namespace.max_vus:
         raise RunConfigError("execution.preallocated_vus must not exceed execution.max_vus")
     total_rps = namespace.rps * namespace.lanes
