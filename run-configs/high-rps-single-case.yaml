@@ -21,6 +21,11 @@ execution:
   max_vus: 40
   lanes: 1
   max_total_rps: 5
+  abort_on_overload: true
+  max_dropped_iterations: 0
+  max_http_req_duration_p95_ms: 3000
+  overload_delay: 5s
+  stop_run_on_batch_abort: true
 
 selection:
   # Replace this value with the exact case id to recheck.
